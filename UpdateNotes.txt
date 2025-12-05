@@ -1,0 +1,54 @@
+COMPLETED: I'm looking to add a deletion funtion to the Preview Model, by Right clicking a selection in preview window to allow cascading deletion of parent selection with suboordinates including the item in <UnitList> and <EntityCompositionList>, but leaving <UnitClassList> and <EntityCompositionClassList> untouched.
+
+COMPLETED: The scrubber needs new tool that allows entity such as equipment and personnel removal based on typed DisCode such as 1.1.225.28.1.0.0. The action removes the entity completely by deletion of the entry within <EntityCompositionClassList> and any associated entry within <EntityCompositionList>.
+
+COMPLETED: Excellent. There's one more thing that I'd like to add, and that is more control over what is imported from the DRAGON workbook before we import into the current or new model. I'm thinking that we could parse the DRAGON workbook first, and then have the option to select ALL, single, or multiple Units from the workbook hiearchy before picking a Side and importing into the model. The import should still add any suboordinate units, equipment, and personnel and place the top or parent unit <SideSuperior> to our chosen Side. Any generated functions such as Lvcid and Unit id and timestamps also need to be considered as before when finally importing from the DRAGON workbook.
+
+COMPLETED: Perfect. There is one more extremely minor issue with the naming of the parent unit(s) that are imported with <SideSuperior>. The naming currently puts an uncessary numbered suffix such as _2, _3, _4, etc. The top unit(s) shouldn't need a suffix.
+
+COMPLETED: Exellent. I did notice another anomaly like the suffix issue we fixed earlier with <SideSuperior>, this time it uncessarily happens with some of the suboordinate units when there was no duplicate in the structure to begin with.
+
+COMPLETED: We still have a suffix issue with naming like _1, _2, _3, etc. For example when I import 31_MTZD_INF_DIV from the DRAGON workbook OSC SOUTH-opfor-DRAGON.xlsx, it creates a suboordinate 31_MED_BN_MTZD_INF_DIV_2 when it should be 31_MED_BN_MTZD_INF_DIV if there is no parent duplicate.
+
+COMPLETED: I need to add inside the Scrubber tab, the ability to enter a DisCode of an entity located in <EntityCompositionClassList>, and replace/change to another typed DisCode.
+
+COMPLETED: We are currently encountering duplicated Unit Names when importing certain dragon workbook scenarios, particularly at the section/team/cmd level. Some units get assigned a 1_, 2_, 3_, etc suffix while others don't have a suffix at all and become duplicated. Perhaps we need to either create a duplicate checker or create a more clever way of naming the units that are imported while still unique and identifiable. 
+
+COMPLETED: When using the scrubber to Remove personnel, we need to comb through the EntityCompositionList to identify which entries have a <crewlist> </crewlist> and remove the <crewlist> tags and contents within the tags the refer to the now missing lvcid.
+
+COMPLETED: We currently can open a jtds obs xml and analyze it which overwrites the current model. What we need is another option to import units and suboordinates from another jtds obs xml into our current model. This needs to be done with precision as we need to ensure that a EntityCompositionClassList and UnitClassList exists or create one from the xml file, properly assign them to the side superior, and also be aware of duplications in units and lvcid.
+
+
+MULTI-THREADED? Speed up Processing and Preview Hierarchy Model on slower systems?
+
+> Answer
+
+  - OBS Scrubber Light only imports GUI, XML, pandas, and helper modules; there is no threading, multiprocessing,
+  QThread, or executor code anywhere in the main module, so every slot runs directly on the PyQt event thread
+  (see the import block at obs_scrubber_light.py:5 and the signal definitions at obs_scrubber_light.py:1961 and
+  obs_scrubber_light.py:4666).
+  - Long-running handlers such as AnalyzerTab.on_browse and ImportDragonTab.on_import invoke load_obs_xml,
+  build_*_classlist_from_xlsx, and di_import_dragon_enhanced inline when the corresponding buttons are clicked,
+  meaning the GUI thread performs all the XML/pandas work synchronously (obs_scrubber_light.py:1991 and
+  obs_scrubber_light.py:4948).
+  - di_import_dragon_enhanced is just a direct alias for dragon_importer_new.import_dragon_enhanced, and that
+  implementation opens the workbook with pandas, then iterates through sheets and rows building XML trees step by step
+  without any parallelism constructs (obs_scrubber_light.py:83 and dragon_importer_new.py:228).
+  - Because the only signaling is PyQt’s default pyqtSignal between widgets, nothing ever hops off the GUI thread, so
+  performance gains from multi-threading are currently unavailable and heavy imports will block the interface.
+
+  If you want faster throughput, the natural next steps are: 1) move the costly pandas/XML work in on_import/on_browse
+  into a QThread or QtConcurrent worker so the UI stays responsive, and 2) only once that works, consider splitting
+  workbook sheets across worker threads or processes (e.g., ThreadPoolExecutor or multiprocessing) if pandas’ own
+  vectorization is not sufficient.
+
+
+> Bypassing the GIL wouldn’t help much here. The heavy work—pandas parsing, NumPy math inside pandas, and lxml tree
+  building—already drops into C extensions that release the GIL while they crunch data. The Python portion (looping
+  rows, wiring XML) is I/O-bound and sequential by design, so even if you used multiple interpreter threads they’d
+  contend on shared state (the XML trees, progress bookkeeping) and add synchronization overhead. Real speedups would
+  come from splitting the job into independent chunks and farming them out to separate processes (each with its own
+  interpreter) or reworking the importer so the C-heavy parts can run in parallel on different slices of the workbook.
+
+
+
