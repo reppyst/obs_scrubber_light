@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sys, traceback, zipfile, random, string, time, copy
+import sys, traceback, zipfile, random, string, time, copy, csv
 
 from datetime import datetime
 
@@ -41,6 +41,9 @@ from PyQt6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
     QHeaderView,
+    QTableWidget,
+    QTableWidgetItem,
+    QSpinBox,
     QDialogButtonBox,
     QMenu,
     QInputDialog,
@@ -2381,6 +2384,354 @@ class ScrubberTab(QWidget):
         self.discode_edit.selectAll()
 
 
+@dataclass
+class _NewUnitData:
+
+    name: str
+    class_name: Optional[str]
+    milstd_code: Optional[str]
+    echelon: Optional[str]
+    strength: int
+    owning_federate: str
+    is_inactive: bool
+    is_transferrable: bool
+    side_value: Optional[str]
+    class_element: Optional[ET._Element]
+
+
+class CreateUnitDialog(QDialog):
+
+    FEDERATE_OPTIONS = ["WARSIM", "JCATS", "JSAF"]
+
+    def __init__(self, parent: QWidget, model: ObsModel, parent_unit: ET._Element):
+        super().__init__(parent)
+        self._model = model
+        self._parent_unit = parent_unit
+        self._result: Optional[_NewUnitData] = None
+        self._code_dirty = False
+        self._unit_classes = self._collect_unit_classes()
+        self._existing_names = self._collect_existing_names()
+        self._side_value = self._determine_parent_side()
+        self._parent_lvc = (text(jfind(parent_unit, "j:LvcId")) or "").strip()
+        self.setWindowTitle("Create Subordinate Unit")
+        self.resize(480, 0)
+        layout = QVBoxLayout(self)
+        context_label = QLabel(
+            "Configure the new unit's metadata. LvcId and IDs will be generated on save."
+        )
+        context_label.setWordWrap(True)
+        layout.addWidget(context_label)
+        form = QFormLayout()
+        parent_label = QLabel(format_unit_label(parent_unit))
+        parent_label.setWordWrap(True)
+        form.addRow("Parent Unit", parent_label)
+        self.unitsuperior_label = QLabel(self._parent_lvc or "(missing LvcId)")
+        form.addRow("Unit Superior", self.unitsuperior_label)
+        self.side_label = QLabel(self._side_value or "(not set)")
+        form.addRow("Side Superior", self.side_label)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Required")
+        form.addRow("Name *", self.name_edit)
+        self.class_combo = QComboBox()
+        self.class_combo.setEditable(True)
+        self.class_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        line_edit = self.class_combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText("Select or type class name")
+        self.class_combo.addItem("")
+        for entry in self._unit_classes:
+            self.class_combo.addItem(entry["name"], entry)
+        self.class_combo.currentIndexChanged.connect(self._on_class_changed)
+        form.addRow("Class Name", self.class_combo)
+        self.code_edit = QLineEdit()
+        self.code_edit.setPlaceholderText("MilStd2525C code")
+        self.code_edit.textEdited.connect(self._mark_code_dirty)
+        form.addRow("MilStd2525C", self.code_edit)
+        self.echelon_combo = QComboBox()
+        self.echelon_combo.addItem("")
+        for echelon in ECHELON_ORDER:
+            self.echelon_combo.addItem(echelon)
+        parent_echelon = (text(jfind(parent_unit, "j:Echelon")) or "").strip()
+        if parent_echelon:
+            idx = self.echelon_combo.findText(parent_echelon, Qt.MatchFlag.MatchExactly)
+            if idx >= 0:
+                self.echelon_combo.setCurrentIndex(idx)
+        form.addRow("Echelon", self.echelon_combo)
+        self.strength_spin = QSpinBox()
+        self.strength_spin.setRange(0, 999999)
+        self.strength_spin.setValue(100)
+        form.addRow("Strength", self.strength_spin)
+        self.federate_combo = QComboBox()
+        for entry in self.FEDERATE_OPTIONS:
+            self.federate_combo.addItem(entry)
+        form.addRow("Owning Federate", self.federate_combo)
+        self.inactive_check = QCheckBox("Mark unit as inactive")
+        form.addRow("Is Inactive", self.inactive_check)
+        self.transfer_check = QCheckBox("Allow transfer between federates")
+        self.transfer_check.setChecked(True)
+        form.addRow("Is Transferrable", self.transfer_check)
+        self.lvc_label = QLabel("Will auto-generate on save")
+        form.addRow("LvcId", self.lvc_label)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _collect_unit_classes(self) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        parent = jfind(self._model.classdata, jtag("UnitClassList"))
+        if parent is None:
+            return results
+        for child in list(parent):
+            if _local(child.tag) != "UnitClass":
+                continue
+            name = (text(jfind(child, "j:AggregateName")) or "").strip()
+            if not name:
+                continue
+            code = (text(jfind(child, "j:MilStd2525CCode")) or "").strip()
+            results.append({"name": name, "code": code, "element": child})
+        results.sort(key=lambda entry: entry["name"].upper())
+        return results
+
+    def _collect_existing_names(self) -> Set[str]:
+        names: Set[str] = set()
+        for unit in _iter_local(self._model.unit_list, "Unit"):
+            nm = (text(jfind(unit, "j:Name")) or "").strip()
+            if nm:
+                names.add(nm.upper())
+        return names
+
+    def _determine_parent_side(self) -> Optional[str]:
+        direct = (text(jfind(self._parent_unit, "j:SideSuperior")) or "").strip()
+        if direct:
+            return direct
+        lvc_to_unit, _ = collect_unit_maps(self._model)
+        derived = _resolve_unit_side(self._parent_unit, lvc_to_unit)
+        return derived
+
+    def _mark_code_dirty(self, _: str) -> None:
+        self._code_dirty = True
+
+    def _current_class_entry(self) -> Optional[Dict[str, Any]]:
+        index = self.class_combo.currentIndex()
+        data = self.class_combo.itemData(index)
+        if isinstance(data, dict):
+            return data
+        text_val = (self.class_combo.currentText() or "").strip().upper()
+        for entry in self._unit_classes:
+            if entry["name"].upper() == text_val:
+                return entry
+        return None
+
+    def _on_class_changed(self, index: int) -> None:
+        entry = self.class_combo.itemData(index)
+        if not isinstance(entry, dict):
+            return
+        code = entry.get("code")
+        if code and (not self._code_dirty or not (self.code_edit.text() or "").strip()):
+            self.code_edit.blockSignals(True)
+            self.code_edit.setText(code)
+            self.code_edit.blockSignals(False)
+            self._code_dirty = False
+
+    def result_data(self) -> Optional[_NewUnitData]:
+        return self._result
+
+    def accept(self) -> None:
+        name = (self.name_edit.text() or "").strip()
+        if not name:
+            QMessageBox.warning(self, "Create Unit", "Name is required.")
+            self.name_edit.setFocus()
+            return
+        upper_name = name.upper()
+        if upper_name in self._existing_names:
+            QMessageBox.warning(
+                self, "Create Unit", f"A unit named '{name}' already exists."
+            )
+            self.name_edit.setFocus()
+            self.name_edit.selectAll()
+            return
+        class_text = (self.class_combo.currentText() or "").strip()
+        class_entry = self._current_class_entry()
+        if not class_text and class_entry:
+            class_text = class_entry.get("name", "")
+        code = (self.code_edit.text() or "").strip()
+        if not code and class_entry and class_entry.get("code"):
+            code = class_entry["code"]
+        echelon = (self.echelon_combo.currentText() or "").strip()
+        if not echelon:
+            echelon = None
+        owning_federate = (self.federate_combo.currentText() or "WARSIM").strip()
+        self._result = _NewUnitData(
+            name=name,
+            class_name=class_text or None,
+            milstd_code=code or None,
+            echelon=echelon,
+            strength=int(self.strength_spin.value()),
+            owning_federate=owning_federate,
+            is_inactive=self.inactive_check.isChecked(),
+            is_transferrable=self.transfer_check.isChecked(),
+            side_value=self._side_value,
+            class_element=class_entry.get("element") if class_entry else None,
+        )
+        super().accept()
+
+
+@dataclass
+class _NewEntityData:
+
+    role: str
+    class_name: Optional[str]
+    owning_federate: str
+    is_inactive: bool
+    is_transferrable: bool
+    is_invincible: bool
+    quantity: int
+    batch_count: int
+
+
+class CreateEntityDialog(QDialog):
+
+    FEDERATE_OPTIONS = ["WARSIM", "JCATS", "JSAF"]
+
+    def __init__(self, parent: QWidget, model: ObsModel, parent_unit: ET._Element):
+        super().__init__(parent)
+        self._model = model
+        self._parent_unit = parent_unit
+        self._result: Optional[_NewEntityData] = None
+        self._existing_roles = self._collect_existing_roles(parent_unit)
+        self._class_entries = self._collect_entity_classes()
+        self._parent_lvc = (text(jfind(parent_unit, "j:LvcId")) or "").strip()
+        self._parent_side = (text(jfind(parent_unit, "j:SideSuperior")) or "").strip()
+        self.setWindowTitle("Create Entity Composition")
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            "Define the entity composition metadata. Role must be unique for the parent unit."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        form = QFormLayout()
+        parent_label = QLabel(format_unit_label(parent_unit))
+        parent_label.setWordWrap(True)
+        form.addRow("Parent Unit", parent_label)
+        self.role_edit = QLineEdit()
+        self.role_edit.setPlaceholderText("Required and unique within unit")
+        form.addRow("Role *", self.role_edit)
+        self.class_combo = QComboBox()
+        self.class_combo.setEditable(True)
+        self.class_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        if self._class_entries:
+            self.class_combo.addItem("")
+            for entry in self._class_entries:
+                self.class_combo.addItem(entry["label"], entry)
+        form.addRow("Class Name", self.class_combo)
+        self.qty_spin = QSpinBox()
+        self.qty_spin.setRange(1, 100000)
+        self.qty_spin.setValue(1)
+        self.qty_spin.setToolTip("Quantity assigned to each new EntityComposition record.")
+        form.addRow("Quantity per entity", self.qty_spin)
+        self.batch_spin = QSpinBox()
+        self.batch_spin.setRange(1, 100)
+        self.batch_spin.setValue(1)
+        self.batch_spin.setToolTip("Number of EntityComposition records to create.")
+        form.addRow("Entities to create", self.batch_spin)
+        self.federate_combo = QComboBox()
+        for entry in self.FEDERATE_OPTIONS:
+            self.federate_combo.addItem(entry)
+        form.addRow("Owning Federate", self.federate_combo)
+        self.inactive_check = QCheckBox("Mark entity as inactive")
+        form.addRow("Is Inactive", self.inactive_check)
+        self.transfer_check = QCheckBox("Allow transfer between federates")
+        self.transfer_check.setChecked(True)
+        form.addRow("Is Transferrable", self.transfer_check)
+        self.invincible_check = QCheckBox("Invincible entity")
+        form.addRow("Is Invincible", self.invincible_check)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _collect_entity_classes(self) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        parent = jfind(self._model.classdata, jtag("EntityCompositionClassList"))
+        if parent is None:
+            return results
+        seen: Set[str] = set()
+        for child in list(parent):
+            if _local(child.tag) != "EntityCompositionClass":
+                continue
+            label = (text(jfind(child, "j:Name")) or "").strip()
+            if not label:
+                label = (text(jfind(child, "j:ClassName")) or "").strip()
+            if not label:
+                continue
+            upper = label.upper()
+            if upper in seen:
+                continue
+            seen.add(upper)
+            results.append({"label": label, "element": child})
+        results.sort(key=lambda entry: entry["label"].upper())
+        return results
+
+    def _collect_existing_roles(self, parent_unit: ET._Element) -> Set[str]:
+        roles: Set[str] = set()
+        parent_lvc = (text(jfind(parent_unit, "j:LvcId")) or "").strip()
+        if not parent_lvc:
+            return roles
+        for ec in _iter_local(self._model.entcomp_list, "EntityComposition"):
+            sup = (text(jfind(ec, "j:UnitSuperior")) or "").strip()
+            if sup != parent_lvc:
+                continue
+            role = (text(jfind(ec, "j:Role")) or "").strip()
+            if role:
+                roles.add(role.upper())
+        return roles
+
+    def result_data(self) -> Optional[_NewEntityData]:
+        return self._result
+
+    def accept(self) -> None:
+        role = (self.role_edit.text() or "").strip()
+        if not role:
+            QMessageBox.warning(self, "Create Entity Composition", "Role is required.")
+            self.role_edit.setFocus()
+            return
+        upper_role = role.upper()
+        if upper_role in self._existing_roles:
+            QMessageBox.warning(
+                self,
+                "Create Entity Composition",
+                f"Role '{role}' already exists for this unit.",
+            )
+            self.role_edit.setFocus()
+            self.role_edit.selectAll()
+            return
+        class_entry = self.class_combo.currentData()
+        class_name = None
+        if isinstance(class_entry, dict):
+            class_name = class_entry.get("label")
+        else:
+            raw_text = (self.class_combo.currentText() or "").strip()
+            class_name = raw_text or None
+        self._result = _NewEntityData(
+            role=role,
+            class_name=class_name,
+            owning_federate=(self.federate_combo.currentText() or "WARSIM").strip(),
+            is_inactive=self.inactive_check.isChecked(),
+            is_transferrable=self.transfer_check.isChecked(),
+            is_invincible=self.invincible_check.isChecked(),
+            quantity=int(self.qty_spin.value()),
+            batch_count=int(self.batch_spin.value()),
+        )
+        super().accept()
+
+
 class ModelPreviewDialog(QDialog):
 
     SIDE_ORDER = list(DEFAULT_SIDE_ORDER)
@@ -2606,15 +2957,19 @@ class ModelPreviewDialog(QDialog):
         menu = QMenu(self)
         rename_action = None
         move_action = None
+        create_action = None
+        create_entity_action = None
         if len(selected_items) == 1:
             kind, _ = selected_items[0]
             if kind == "unit":
                 rename_action = menu.addAction("Rename unit...")
                 move_action = menu.addAction("Move unit...")
+                create_action = menu.addAction("Add subordinate unit...")
+                create_entity_action = menu.addAction("Add entity composition...")
             elif kind == "entity":
                 rename_action = menu.addAction("Rename entity composition...")
                 move_action = menu.addAction("Move entity to unit...")
-            if rename_action or move_action:
+            if rename_action or move_action or create_action:
                 menu.addSeparator()
         delete_action = None
         consolidate_action = None
@@ -2646,6 +3001,12 @@ class ModelPreviewDialog(QDialog):
                 consolidate_action.setEnabled(False)
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if chosen is None:
+            return
+        if create_action is not None and chosen == create_action:
+            self._handle_create_unit(selected_items[0][1])
+            return
+        if create_entity_action is not None and chosen == create_entity_action:
+            self._handle_create_entity(selected_items[0][1])
             return
         if rename_action is not None and chosen == rename_action:
             self._handle_rename_request(selected_items[0])
@@ -2898,6 +3259,55 @@ class ModelPreviewDialog(QDialog):
             QMessageBox.information(self, "Move", message)
         self.set_model(self._model)
 
+    def _handle_create_unit(self, parent_unit: ET._Element) -> None:
+        if self._model is None:
+            return
+        dialog = CreateUnitDialog(self, self._model, parent_unit)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        data = dialog.result_data()
+        if data is None:
+            return
+        new_unit = self._create_unit_under_parent(parent_unit, data)
+        if new_unit is None:
+            QMessageBox.warning(
+                self,
+                "Create Unit",
+                "Failed to create the new unit. Verify the model is loaded correctly.",
+            )
+            return
+        self.set_model(self._model)
+        self._select_tree_item_for_unit(new_unit)
+        QMessageBox.information(
+            self,
+            "Create Unit",
+            f"Created new unit '{self._format_unit_label(new_unit)}'.",
+        )
+
+    def _handle_create_entity(self, parent_unit: ET._Element) -> None:
+        if self._model is None:
+            return
+        dialog = CreateEntityDialog(self, self._model, parent_unit)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        data = dialog.result_data()
+        if data is None:
+            return
+        created = self._create_entities_under_unit(parent_unit, data)
+        if not created:
+            QMessageBox.warning(
+                self,
+                "Create Entity Composition",
+                "Failed to create the entity composition(s). Ensure the unit has an LvcId.",
+            )
+            return
+        self.set_model(self._model)
+        QMessageBox.information(
+            self,
+            "Create Entity Composition",
+            f"Created {created} entity composition(s) under '{self._format_unit_label(parent_unit)}'.",
+        )
+
     def _move_unit(self, unit_elem: ET._Element, target: Tuple[str, Any]) -> str:
         kind = target[0]
         label = self._format_unit_label(unit_elem)
@@ -2968,6 +3378,192 @@ class ModelPreviewDialog(QDialog):
         return (
             f"Moved entity composition under '{self._format_unit_label(parent_unit)}'."
         )
+
+    def _create_unit_under_parent(
+        self, parent_unit: ET._Element, data: _NewUnitData
+    ) -> Optional[ET._Element]:
+        used_ids, used_lvc = self._collect_used_identifiers()
+        parent_lvc = self._ensure_unit_lvc(parent_unit, used_lvc)
+        side_value = data.side_value
+        if not side_value:
+            lvc_to_unit, _ = collect_unit_maps(self._model)
+            derived = _resolve_unit_side(parent_unit, lvc_to_unit)
+            side_value = derived
+        if self._model is None:
+            return None
+        new_unit = ET.SubElement(self._model.unit_list, jtag("Unit"))
+        new_unit.set("id", _gen_unit_xml_id(used_ids))
+        new_unit.set("dateTimeStamp", _now_iso_seconds_no_tz())
+        ET.SubElement(new_unit, jtag("Name")).text = data.name
+        if data.class_name:
+            ET.SubElement(new_unit, jtag("ClassName")).text = data.class_name
+        if data.echelon:
+            ET.SubElement(new_unit, jtag("Echelon")).text = data.echelon
+        code_value = data.milstd_code
+        if not code_value and data.class_element is not None:
+            code_value = (text(jfind(data.class_element, "j:MilStd2525CCode")) or "").strip()
+        if code_value:
+            ET.SubElement(new_unit, jtag("MilStd2525CCode")).text = code_value
+        if parent_lvc:
+            ET.SubElement(new_unit, jtag("UnitSuperior")).text = parent_lvc
+        if side_value:
+            ET.SubElement(new_unit, jtag("SideSuperior")).text = side_value
+        lvc_value = _gen_unique_lvcid("U", used_lvc)
+        ET.SubElement(new_unit, jtag("LvcId")).text = lvc_value
+        ET.SubElement(new_unit, jtag("Strength")).text = str(data.strength)
+        own = ET.SubElement(new_unit, jtag("OwningFederate"))
+        ET.SubElement(own, jtag("Federate")).text = data.owning_federate
+        ET.SubElement(new_unit, jtag("IsInactive")).text = (
+            "true" if data.is_inactive else "false"
+        )
+        ET.SubElement(new_unit, jtag("IsTransferrable")).text = (
+            "true" if data.is_transferrable else "false"
+        )
+        ET.SubElement(new_unit, jtag("IsAggCommandable")).text = "false"
+        if data.class_element is not None:
+            self._copy_unitclass_enumeration(new_unit, data.class_element)
+        return new_unit
+
+    def _copy_unitclass_enumeration(
+        self, unit_elem: ET._Element, class_elem: ET._Element
+    ) -> None:
+        ude = jfind(class_elem, "j:UnitDisEnumeration")
+        if ude is None:
+            return
+        dest = ET.SubElement(unit_elem, jtag("UnitDisEnumeration"))
+        for key, value in ude.attrib.items():
+            if value is not None:
+                dest.set(key, str(value))
+
+    def _existing_roles_for_unit(self, parent_unit: ET._Element) -> Set[str]:
+        roles: Set[str] = set()
+        if self._model is None:
+            return roles
+        parent_lvc = (text(jfind(parent_unit, "j:LvcId")) or "").strip()
+        if not parent_lvc:
+            return roles
+        for ec in _iter_local(self._model.entcomp_list, "EntityComposition"):
+            sup = (text(jfind(ec, "j:UnitSuperior")) or "").strip()
+            if sup != parent_lvc:
+                continue
+            role = (text(jfind(ec, "j:Role")) or "").strip()
+            if role:
+                roles.add(role.upper())
+        return roles
+
+    def _collect_used_identifiers(self) -> Tuple[Set[str], Set[str]]:
+        used_ids: Set[str] = set()
+        used_lvc: Set[str] = set()
+        if self._model is None:
+            return used_ids, used_lvc
+        for unit in _iter_local(self._model.unit_list, "Unit"):
+            unit_id = unit.get("id")
+            if unit_id:
+                used_ids.add(unit_id.strip())
+            lvc = (text(jfind(unit, "j:LvcId")) or "").strip()
+            if lvc:
+                used_lvc.add(lvc)
+        for ec in _iter_local(self._model.entcomp_list, "EntityComposition"):
+            eid = ec.get("id")
+            if eid:
+                used_ids.add(eid.strip())
+            lvc = (text(jfind(ec, "j:LvcId")) or "").strip()
+            if lvc:
+                used_lvc.add(lvc)
+        return used_ids, used_lvc
+
+    def _ensure_unit_lvc(self, unit_elem: ET._Element, used_lvc: Set[str]) -> str:
+        existing = (text(jfind(unit_elem, "j:LvcId")) or "").strip()
+        if existing:
+            used_lvc.add(existing)
+            return existing
+        new_value = _gen_unique_lvcid("U", used_lvc)
+        ET.SubElement(unit_elem, jtag("LvcId")).text = new_value
+        return new_value
+
+    def _select_tree_item_for_unit(self, target: ET._Element) -> None:
+        if target is None:
+            return
+
+        def visit(item: QTreeWidgetItem) -> bool:
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(data, tuple) and data[0] == "unit" and data[1] is target:
+                self.tree.setCurrentItem(item)
+                self.tree.scrollToItem(item)
+                return True
+            for idx in range(item.childCount()):
+                child = item.child(idx)
+                if visit(child):
+                    item.setExpanded(True)
+                    return True
+            return False
+
+        for i in range(self.tree.topLevelItemCount()):
+            if visit(self.tree.topLevelItem(i)):
+                break
+
+    def _create_entities_under_unit(
+        self, parent_unit: ET._Element, data: _NewEntityData
+    ) -> int:
+        if self._model is None:
+            return 0
+        ent_list = self._model.entcomp_list
+        if ent_list is None:
+            ent_list = ET.SubElement(self._model.scenario, jtag("EntityCompositionList"))
+            self._model.entcomp_list = ent_list
+        used_ids, used_lvc = self._collect_used_identifiers()
+        parent_lvc = self._ensure_unit_lvc(parent_unit, used_lvc)
+        if not parent_lvc:
+            return 0
+        parent_side = (text(jfind(parent_unit, "j:SideSuperior")) or "").strip()
+        created = 0
+        existing_roles = self._existing_roles_for_unit(parent_unit)
+        roles_used: Set[str] = set()
+        class_name = data.class_name
+        for _ in range(data.batch_count):
+            unique_role = data.role
+            if created > 0:
+                base = f"{data.role}_{created + 1}"
+                candidate = base
+                suffix = 1
+                while (
+                    candidate.upper() in existing_roles
+                    or candidate.upper() in roles_used
+                ):
+                    suffix += 1
+                    candidate = f"{base}_{suffix}"
+                unique_role = candidate
+            unique_upper = unique_role.upper()
+            while unique_upper in existing_roles or unique_upper in roles_used:
+                unique_role = f"{unique_role}_{created+1}"
+                unique_upper = unique_role.upper()
+            ec = ET.SubElement(ent_list, jtag("EntityComposition"))
+            ec.set("id", _gen_unit_xml_id(used_ids))
+            lvc_value = _gen_unique_lvcid("U", used_lvc)
+            ET.SubElement(ec, jtag("LvcId")).text = lvc_value
+            ET.SubElement(ec, jtag("Role")).text = unique_role
+            if data.quantity != 1:
+                ET.SubElement(ec, jtag("Quantity")).text = str(data.quantity)
+            ET.SubElement(ec, jtag("UnitSuperior")).text = parent_lvc
+            if class_name:
+                ET.SubElement(ec, jtag("ClassName")).text = class_name
+            if parent_side:
+                ET.SubElement(ec, jtag("SideSuperior")).text = parent_side
+            ow = ET.SubElement(ec, jtag("OwningFederate"))
+            ET.SubElement(ow, jtag("Federate")).text = data.owning_federate
+            ET.SubElement(ec, jtag("IsInactive")).text = (
+                "true" if data.is_inactive else "false"
+            )
+            ET.SubElement(ec, jtag("IsTransferrable")).text = (
+                "true" if data.is_transferrable else "false"
+            )
+            ET.SubElement(ec, jtag("IsInvincible")).text = (
+                "true" if data.is_invincible else "false"
+            )
+            created += 1
+            roles_used.add(unique_upper)
+            existing_roles.add(unique_upper)
+        return created
 
     def _apply_side_to_subtree(self, unit_elem: ET._Element, side_value: str) -> int:
         _, parent_to_children = collect_unit_maps(self._model)
@@ -3957,6 +4553,614 @@ class ObsMoveUnitDialog(QDialog):
 
     def selected_target(self) -> Optional[Tuple[str, Any]]:
         return self._result
+
+
+@dataclass
+class _EntityClassRowMeta:
+
+    element: Optional[ET._Element]
+    is_new: bool
+
+
+class EntityClassesTab(QWidget):
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.model: Optional[ObsModel] = None
+        self._row_meta: Dict[str, _EntityClassRowMeta] = {}
+        self._new_row_seq = 0
+        self._build()
+
+    def _build(self):
+        outer = QVBoxLayout(self)
+        self.info_label = QLabel(
+            "Load or create a JTDS OBS model to view EntityCompositionClass entries."
+        )
+        self.info_label.setWordWrap(True)
+        outer.addWidget(self.info_label)
+        controls = QHBoxLayout()
+        self.btn_refresh = QPushButton("Reload")
+        self.btn_refresh.clicked.connect(self._reload_table)
+        self.btn_add = QPushButton("Add Row")
+        self.btn_add.clicked.connect(self._on_add_row)
+        self.btn_save = QPushButton("Save Changes")
+        self.btn_save.clicked.connect(self._on_save)
+        self.btn_import = QPushButton("Import CSV...")
+        self.btn_import.clicked.connect(self._on_import)
+        self.btn_export = QPushButton("Export CSV...")
+        self.btn_export.clicked.connect(self._on_export)
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(["Name (A-Z)", "DisCode (A-Z)"])
+        self.btn_sort = QPushButton("Sort")
+        self.btn_sort.clicked.connect(self._on_sort)
+        controls.addWidget(self.btn_refresh)
+        controls.addWidget(self.btn_add)
+        controls.addWidget(self.btn_save)
+        controls.addWidget(self.btn_import)
+        controls.addWidget(self.btn_export)
+        controls.addWidget(QLabel("Sort by:"))
+        controls.addWidget(self.sort_combo)
+        controls.addWidget(self.btn_sort)
+        controls.addStretch()
+        outer.addLayout(controls)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Name", "Federate", "TypeName", "DisCode"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.SelectedClicked
+        )
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        outer.addWidget(self.table)
+        self.status_label = QLabel("No model loaded.")
+        outer.addWidget(self.status_label)
+        self._set_enabled(False)
+
+    def _set_enabled(self, enabled: bool) -> None:
+        for widget in [
+            self.btn_refresh,
+            self.btn_add,
+            self.btn_save,
+            self.btn_import,
+            self.btn_export,
+            self.sort_combo,
+            self.btn_sort,
+            self.table,
+        ]:
+            widget.setEnabled(enabled)
+
+    def set_model(self, model: Optional[ObsModel]):
+        self.model = model
+        has_model = model is not None
+        self._set_enabled(has_model)
+        if has_model:
+            self._reload_table()
+        else:
+            self._clear_table()
+            self.info_label.setText(
+                "Load or create a JTDS OBS model to manage EntityCompositionClasses."
+            )
+            self.status_label.setText("No model loaded.")
+
+    def _clear_table(self) -> None:
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
+        self._row_meta.clear()
+        self.table.setSortingEnabled(True)
+
+    def _reload_table(self) -> None:
+        if not self.model:
+            return
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
+        self._row_meta.clear()
+        ecc_parent = jfind(self.model.classdata, jtag("EntityCompositionClassList"))
+        if ecc_parent is None:
+            self.info_label.setText(
+                "This model does not have an EntityCompositionClassList yet. Saving new rows will create it."
+            )
+            self.status_label.setText("0 entity classes loaded.")
+            self.table.setSortingEnabled(True)
+            return
+        rows: List[Tuple[str, str, str, str, ET._Element]] = []
+        seen: Set[str] = set()
+        for ecc in list(ecc_parent):
+            if _local(ecc.tag) != "EntityCompositionClass":
+                continue
+            name = self._extract_name(ecc)
+            if not name:
+                continue
+            key = name.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            federate, typename = self._extract_alias_values(ecc)
+            discode = self._extract_discode(ecc)
+            rows.append((name, federate, typename, discode, ecc))
+        rows.sort(key=lambda item: item[0].upper())
+        for name, federate, typename, discode, ecc in rows:
+            self._append_row(name, federate, typename, discode, ecc, is_new=False)
+        self.table.setSortingEnabled(True)
+        self.info_label.setText(
+            "Edit Federate, TypeName, and DisCode values. Add rows to create new EntityCompositionClasses."
+        )
+        self.status_label.setText(f"{len(rows)} entity classes loaded.")
+
+    def _next_row_key(self, element: Optional[ET._Element]) -> str:
+        if element is not None:
+            return f"ecc-{id(element)}"
+        self._new_row_seq += 1
+        return f"new-{self._new_row_seq}"
+
+    def _append_row(
+        self,
+        name: str,
+        federate: str,
+        typename: str,
+        discode: str,
+        element: Optional[ET._Element],
+        *,
+        is_new: bool,
+    ) -> None:
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        key = self._next_row_key(element)
+        name_item = QTableWidgetItem(name)
+        name_item.setData(Qt.ItemDataRole.UserRole, key)
+        if not is_new:
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        self.table.setItem(row, 0, name_item)
+        for col, value in enumerate([federate, typename, discode], start=1):
+            item = QTableWidgetItem(value or "")
+            self.table.setItem(row, col, item)
+        self._row_meta[key] = _EntityClassRowMeta(element=element, is_new=is_new)
+
+    def _table_rows(self) -> List[Tuple[str, str, str, str]]:
+        rows: List[Tuple[str, str, str, str]] = []
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            fed_item = self.table.item(row, 1)
+            type_item = self.table.item(row, 2)
+            discode_item = self.table.item(row, 3)
+            name = (name_item.text() if name_item else "").strip()
+            federate = (fed_item.text() if fed_item else "").strip()
+            typename = (type_item.text() if type_item else "").strip()
+            discode = (discode_item.text() if discode_item else "").strip()
+            rows.append((name, federate, typename, discode))
+        return rows
+
+    def _name_to_row(self) -> Dict[str, int]:
+        mapping: Dict[str, int] = {}
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            if not name_item:
+                continue
+            name = (name_item.text() or "").strip()
+            if not name:
+                continue
+            mapping[name.upper()] = row
+        return mapping
+
+    def _table_discode_map(self) -> Dict[str, str]:
+        mapping: Dict[str, str] = {}
+        for name, _, _, discode in self._table_rows():
+            if not name or not discode:
+                continue
+            try:
+                _, normalized = self._normalize_discode_value(discode)
+            except ValueError:
+                continue
+            mapping[normalized] = name.upper()
+        return mapping
+
+    def _set_cell_text(self, row: int, column: int, value: str) -> None:
+        item = self.table.item(row, column)
+        if item is None:
+            item = QTableWidgetItem(value)
+            self.table.setItem(row, column, item)
+        else:
+            item.setText(value)
+
+    def _normalize_discode_value(self, raw: str) -> Tuple[Dict[str, str], str]:
+        attrs = _parse_discode_query(raw)
+        normalized = ".".join(attrs[key] for key in _DISCODE_ATTRS)
+        return attrs, normalized
+
+    def _extract_name(self, ecc: ET._Element) -> str:
+        for tag in ("Name", "ClassName", "TypeName"):
+            value = text(jfind(ecc, f"j:{tag}"))
+            if value:
+                return value.strip()
+        for child in list(ecc):
+            if _local(child.tag) in {"Name", "ClassName", "TypeName"} and child.text:
+                return child.text.strip()
+        return ""
+
+    def _extract_alias_values(self, ecc: ET._Element) -> Tuple[str, str]:
+        alias_list = jfind(ecc, "j:AliasList")
+        alias = None
+        if alias_list is not None:
+            for child in list(alias_list):
+                if _local(child.tag) == "Alias":
+                    alias = child
+                    break
+        if alias is None:
+            alias = next((child for child in _iter_local(ecc, "Alias")), None)
+        if alias is None:
+            return "", ""
+        federate = ""
+        typename = ""
+        fed_elem = next(
+            (child for child in list(alias) if _local(child.tag) == "Federate" and child.text),
+            None,
+        )
+        if fed_elem is not None:
+            federate = fed_elem.text.strip()
+        type_elem = next(
+            (child for child in list(alias) if _local(child.tag) == "TypeName" and child.text),
+            None,
+        )
+        if type_elem is not None:
+            typename = type_elem.text.strip()
+        return federate, typename
+
+    def _find_discode_element(self, ecc: ET._Element) -> Optional[ET._Element]:
+        for child in list(ecc):
+            if _local(child.tag) == "DisCode":
+                return child
+        return next((child for child in _iter_local(ecc, "DisCode")), None)
+
+    def _extract_discode(self, ecc: ET._Element) -> str:
+        discode_elem = self._find_discode_element(ecc)
+        if discode_elem is None:
+            return ""
+        parts: List[str] = []
+        for key in _DISCODE_ATTRS:
+            attr = discode_elem.get(key)
+            if attr is None:
+                return ""
+            parts.append(_normalize_discode_component(attr))
+        return ".".join(parts)
+
+    def _on_add_row(self) -> None:
+        if not self.model:
+            return
+        self._append_row("", "", "", "", None, is_new=True)
+        self.status_label.setText(
+            f"{self.table.rowCount()} row(s) in table. New rows require a Name before saving."
+        )
+
+    def _on_sort(self) -> None:
+        column = 0 if self.sort_combo.currentIndex() == 0 else 3
+        self.table.sortItems(column)
+
+    def _on_export(self) -> None:
+        rows = self._table_rows()
+        if not rows:
+            QMessageBox.information(
+                self, "Export Entity Classes", "No rows to export."
+            )
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Entity Classes",
+            "EntityClasses.csv",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["Name", "Federate", "TypeName", "DisCode"])
+                for record in rows:
+                    writer.writerow(record)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Export Entity Classes", f"Failed to export: {exc}"
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Export Entity Classes",
+            f"Exported {len(rows)} row(s) to {path}",
+        )
+
+    def _resolve_field_name(self, fieldnames: Optional[List[str]], target: str) -> Optional[str]:
+        if not fieldnames:
+            return None
+        normalized_target = target.replace(" ", "").lower()
+        for name in fieldnames:
+            normalized = name.replace(" ", "").lower()
+            if normalized == normalized_target:
+                return name
+        return None
+
+    def _on_import(self) -> None:
+        if not self.model:
+            QMessageBox.information(
+                self,
+                "Import Entity Classes",
+                "Load or create a JTDS OBS model before importing.",
+            )
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Entity Classes",
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", newline="", encoding="utf-8-sig") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = reader.fieldnames or []
+                name_field = self._resolve_field_name(fieldnames, "Name")
+                if not name_field:
+                    raise ValueError("CSV is missing a 'Name' column.")
+                fed_field = self._resolve_field_name(fieldnames, "Federate")
+                type_field = self._resolve_field_name(fieldnames, "TypeName")
+                disc_field = self._resolve_field_name(fieldnames, "DisCode")
+                incoming: List[Dict[str, str]] = []
+                seen_names: Set[str] = set()
+                discode_conflicts: Dict[str, str] = {}
+                issues: List[str] = []
+                line_num = 1
+                existing_discodes = self._table_discode_map()
+                for row in reader:
+                    line_num += 1
+                    name = (row.get(name_field) or "").strip()
+                    if not name:
+                        issues.append(f"Row {line_num}: Missing Name; skipped.")
+                        continue
+                    upper = name.upper()
+                    if upper in seen_names:
+                        issues.append(
+                            f"Row {line_num}: Duplicate Name '{name}' within file; skipped."
+                        )
+                        continue
+                    federate = (
+                        (row.get(fed_field) or "").strip() if fed_field else ""
+                    )
+                    typename = (
+                        (row.get(type_field) or "").strip() if type_field else ""
+                    )
+                    discode_raw = (
+                        (row.get(disc_field) or "").strip() if disc_field else ""
+                    )
+                    normalized_disc = ""
+                    if discode_raw:
+                        try:
+                            _, normalized_disc = self._normalize_discode_value(discode_raw)
+                        except ValueError as exc:
+                            issues.append(f"Row {line_num}: {exc}; skipped.")
+                            continue
+                        owner_existing = existing_discodes.get(normalized_disc)
+                        if owner_existing and owner_existing != upper:
+                            issues.append(
+                                f"Row {line_num}: DisCode already used by '{owner_existing}'."
+                            )
+                            continue
+                        owner_incoming = discode_conflicts.get(normalized_disc)
+                        if owner_incoming and owner_incoming != upper:
+                            issues.append(
+                                f"Row {line_num}: DisCode duplicates '{owner_incoming}'."
+                            )
+                            continue
+                        discode_conflicts[normalized_disc] = upper
+                    incoming.append(
+                        {
+                            "name": name,
+                            "name_upper": upper,
+                            "federate": federate,
+                            "typename": typename,
+                            "discode": normalized_disc,
+                        }
+                    )
+                    seen_names.add(upper)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Import Entity Classes", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Import Entity Classes", f"Failed to import: {exc}"
+            )
+            return
+        if not incoming:
+            msg = "No valid rows were imported."
+            if issues:
+                preview = "\n".join(issues[:5])
+                if len(issues) > 5:
+                    preview += "\n..."
+                msg += f"\nIssues:\n{preview}"
+            QMessageBox.information(self, "Import Entity Classes", msg)
+            return
+        name_to_row = self._name_to_row()
+        updated = 0
+        created = 0
+        sorting_prev = self.table.isSortingEnabled()
+        self.table.setSortingEnabled(False)
+        try:
+            for entry in incoming:
+                idx = name_to_row.get(entry["name_upper"])
+                if idx is not None:
+                    self._set_cell_text(idx, 1, entry["federate"])
+                    self._set_cell_text(idx, 2, entry["typename"])
+                    self._set_cell_text(idx, 3, entry["discode"])
+                    updated += 1
+                else:
+                    self._append_row(
+                        entry["name"],
+                        entry["federate"],
+                        entry["typename"],
+                        entry["discode"],
+                        None,
+                        is_new=True,
+                    )
+                    created += 1
+        finally:
+            self.table.setSortingEnabled(sorting_prev)
+        total_rows = self.table.rowCount()
+        self.status_label.setText(
+            f"Table now has {total_rows} row(s). Imported {created} new, updated {updated}."
+        )
+        summary = (
+            f"Import complete. Added {created} row(s), updated {updated} row(s)."
+        )
+        if issues:
+            preview = "\n".join(issues[:5])
+            if len(issues) > 5:
+                preview += "\n..."
+            summary += f"\nWarnings:\n{preview}"
+        QMessageBox.information(self, "Import Entity Classes", summary)
+
+    def _ensure_child_text(self, parent: ET._Element, tag: str, value: str) -> ET._Element:
+        node = jfind(parent, f"j:{tag}")
+        if node is None:
+            node = ET.SubElement(parent, jtag(tag))
+        node.text = value
+        return node
+
+    def _update_alias(self, ecc: ET._Element, federate: str, typename: str) -> None:
+        alias_list = jfind(ecc, "j:AliasList")
+        if alias_list is None:
+            alias_list = ET.SubElement(ecc, jtag("AliasList"))
+        alias = jfind(alias_list, "j:Alias")
+        if alias is None:
+            alias = ET.SubElement(alias_list, jtag("Alias"))
+        fed = jfind(alias, "j:Federate")
+        if fed is None:
+            fed = ET.SubElement(alias, jtag("Federate"))
+        fed.text = federate or None
+        tname = jfind(alias, "j:TypeName")
+        if tname is None:
+            tname = ET.SubElement(alias, jtag("TypeName"))
+        tname.text = typename or None
+
+    def _update_discode(
+        self, ecc: ET._Element, attrs: Optional[Dict[str, str]]
+    ) -> None:
+        discode_elem = self._find_discode_element(ecc)
+        if attrs is None:
+            if discode_elem is not None and discode_elem in list(ecc):
+                ecc.remove(discode_elem)
+            return
+        if discode_elem is None:
+            discode_elem = ET.SubElement(ecc, jtag("DisCode"))
+        for key in _DISCODE_ATTRS:
+            discode_elem.set(key, attrs.get(key, "0"))
+
+    def _collect_existing_name_keys(self) -> Set[str]:
+        keys: Set[str] = set()
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if not item:
+                continue
+            key = item.data(Qt.ItemDataRole.UserRole)
+            if key is None:
+                continue
+            meta = self._row_meta.get(key)
+            if not meta or meta.is_new:
+                continue
+            name = (item.text() or "").strip()
+            if name:
+                keys.add(name.upper())
+        return keys
+
+    def _on_save(self) -> None:
+        if not self.model:
+            return
+        ecc_parent = jfind(self.model.classdata, jtag("EntityCompositionClassList"))
+        if ecc_parent is None:
+            ecc_parent = ET.SubElement(
+                self.model.classdata, jtag("EntityCompositionClassList")
+            )
+        errors: List[str] = []
+        created = 0
+        updated = 0
+        existing_name_keys = self._collect_existing_name_keys()
+        discode_owner: Dict[str, Tuple[str, str]] = {}
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            if name_item is None:
+                continue
+            key = name_item.data(Qt.ItemDataRole.UserRole)
+            meta = self._row_meta.get(key)
+            if not meta:
+                continue
+            name = (name_item.text() or "").strip()
+            fed_item = self.table.item(row, 1)
+            federate = (fed_item.text() if fed_item else "").strip()
+            type_item = self.table.item(row, 2)
+            typename = (type_item.text() if type_item else "").strip()
+            discode_item = self.table.item(row, 3)
+            discode_raw = (discode_item.text() if discode_item else "").strip()
+            discode_attrs: Optional[Dict[str, str]] = None
+            normalized_disc: Optional[str] = None
+            if discode_raw:
+                try:
+                    discode_attrs, normalized_disc = self._normalize_discode_value(
+                        discode_raw
+                    )
+                except ValueError as exc:
+                    errors.append(f"Row {row + 1}: {exc}")
+                    continue
+            if normalized_disc:
+                display_name = name or f"Row {row + 1}"
+                upper_name = display_name.upper()
+                owner = discode_owner.get(normalized_disc)
+                if owner and owner[0] != upper_name:
+                    errors.append(
+                        f"Row {row + 1}: DisCode duplicates '{owner[1]}' entries."
+                    )
+                    continue
+                discode_owner[normalized_disc] = (upper_name, display_name)
+            if meta.is_new:
+                if not name:
+                    errors.append(f"Row {row + 1}: Name is required for new entries.")
+                    continue
+                key_upper = name.upper()
+                if key_upper in existing_name_keys:
+                    errors.append(
+                        f"Row {row + 1}: Name '{name}' already exists in the current list."
+                    )
+                    continue
+                existing_name_keys.add(key_upper)
+                ecc = ET.SubElement(ecc_parent, jtag("EntityCompositionClass"))
+                self._ensure_child_text(ecc, "Name", name)
+                self._ensure_child_text(ecc, "ClassName", name)
+                meta.element = ecc
+                meta.is_new = False
+                created += 1
+            else:
+                ecc = meta.element
+                if ecc is None:
+                    continue
+                if name:
+                    self._ensure_child_text(ecc, "Name", name)
+                    self._ensure_child_text(ecc, "ClassName", name)
+                updated += 1
+            if meta.element is None:
+                continue
+            self._update_alias(meta.element, federate, typename)
+            self._update_discode(meta.element, discode_attrs)
+        if errors:
+            preview = "\n".join(errors[:5])
+            if len(errors) > 5:
+                preview += "\n..."
+            QMessageBox.warning(self, "Save Entity Classes", preview)
+            return
+        QMessageBox.information(
+            self,
+            "Save Entity Classes",
+            f"EntityCompositionClass changes saved. Updated {updated}, created {created}.",
+        )
+        self._reload_table()
 
 
 class GenerateTab(QWidget):
@@ -5400,11 +6604,13 @@ class MainWindow(QWidget):
         self.tab_an = AnalyzerTab(self)
         self.tab_sc = ScrubberTab(self)
         self.tab_ge = GenerateTab(self)
+        self.tab_ecc = EntityClassesTab(self)
         self.tab_imp = ImportDragonTab(self)
         self.tabs.addTab(self.tab_an, "1) Analyzer")
         self.tabs.addTab(self.tab_sc, "2) Scrubber")
         self.tabs.addTab(self.tab_ge, "3) Generate")
-        self.tabs.addTab(self.tab_imp, "4) Import DRAGON")
+        self.tabs.addTab(self.tab_ecc, "4) Entity Classes")
+        self.tabs.addTab(self.tab_imp, "5) Import DRAGON")
         lay = QVBoxLayout(self)
         self.license_label = QLabel(self._license_summary())
         self.license_label.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -5417,6 +6623,7 @@ class MainWindow(QWidget):
         self.tab_an.set_model(model)
         self.tab_sc.set_model(model)
         self.tab_ge.set_model(model)
+        self.tab_ecc.set_model(model)
         self.tab_imp.set_model(model)
 
     def _license_summary(self) -> str:
