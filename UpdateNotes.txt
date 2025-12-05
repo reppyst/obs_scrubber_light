@@ -20,7 +20,7 @@ COMPLETED: We currently can open a jtds obs xml and analyze it which overwrites 
 
 TODO: New tab, editable table format that populates unique Name, Federate, TypeName, and DisCode from EntityCompositionClass's in EntityCompositionClassList. Sortable by Name or DisCode. Can edit DisCode, Federate, TypeName, and save. Capability to insert new rows and create new EntityCompositionClass based on information entered into cells.
 
-TODO: Expanded Preview Hiearchy Model. Capability to create new Unit under selection, input for unique Name, input for milstd2525ccode(perhaps a way to do this selectable and smartly), auto-generate lvcid, selectable ClassName pulled from UnitClassList, selectable echelon, selectable owningfederate WARSIM, JCATS, JSAF. IsInactive true or false. IsTransferrable true or false. Auto-fill sidesuperior and unitsuperior.
+TODO: Expanded Preview Hiearchy Model. Capability to create new Unit under selection, input for unique Name, input for milstd2525ccode or selectable from unitclasslist match, auto-generate lvcid, selectable ClassName pulled from UnitClassList, strength 100 as default selectable echelon, selectable owningfederate WARSIM, JCATS, JSAF. IsInactive true or false. IsTransferrable true or false. Auto-fill sidesuperior and unitsuperior.
 
 TODO: Capability to create entitycomposition and add under a unit in Preview Hierarchy Model, Role is user input and unique. ClassName based on available entities in EntityCompositionClassList. Need to make sure ID is generated and unique. LvcId is generated and unique. OwningFederate selection. UnitSuperior is populated based on placement. IsInactive, IsTransferrable, IsInvincible with true or false options. Can create multiple based on number desired, keep things unique.
 
