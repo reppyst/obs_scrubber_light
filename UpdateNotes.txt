@@ -18,37 +18,14 @@ COMPLETED: When using the scrubber to Remove personnel, we need to comb through 
 
 COMPLETED: We currently can open a jtds obs xml and analyze it which overwrites the current model. What we need is another option to import units and suboordinates from another jtds obs xml into our current model. This needs to be done with precision as we need to ensure that a EntityCompositionClassList and UnitClassList exists or create one from the xml file, properly assign them to the side superior, and also be aware of duplications in units and lvcid.
 
+TODO: New tab, editable table format that populates unique Name, Federate, TypeName, and DisCode from EntityCompositionClass's in EntityCompositionClassList. Sortable by Name or DisCode. Can edit DisCode, Federate, TypeName, and save. Capability to insert new rows and create new EntityCompositionClass based on information entered into cells.
 
-MULTI-THREADED? Speed up Processing and Preview Hierarchy Model on slower systems?
+TODO: Expanded Preview Hiearchy Model. Capability to create new Unit under selection, input for unique Name, input for milstd2525ccode(perhaps a way to do this selectable and smartly), auto-generate lvcid, selectable ClassName pulled from UnitClassList, selectable echelon, selectable owningfederate WARSIM, JCATS, JSAF. IsInactive true or false. IsTransferrable true or false. Auto-fill sidesuperior and unitsuperior.
 
-> Answer
+TODO: Capability to create entitycomposition and add under a unit in Preview Hierarchy Model, Role is user input and unique. ClassName based on available entities in EntityCompositionClassList. Need to make sure ID is generated and unique. LvcId is generated and unique. OwningFederate selection. UnitSuperior is populated based on placement. IsInactive, IsTransferrable, IsInvincible with true or false options. Can create multiple based on number desired, keep things unique.
 
-  - OBS Scrubber Light only imports GUI, XML, pandas, and helper modules; there is no threading, multiprocessing,
-  QThread, or executor code anywhere in the main module, so every slot runs directly on the PyQt event thread
-  (see the import block at obs_scrubber_light.py:5 and the signal definitions at obs_scrubber_light.py:1961 and
-  obs_scrubber_light.py:4666).
-  - Long-running handlers such as AnalyzerTab.on_browse and ImportDragonTab.on_import invoke load_obs_xml,
-  build_*_classlist_from_xlsx, and di_import_dragon_enhanced inline when the corresponding buttons are clicked,
-  meaning the GUI thread performs all the XML/pandas work synchronously (obs_scrubber_light.py:1991 and
-  obs_scrubber_light.py:4948).
-  - di_import_dragon_enhanced is just a direct alias for dragon_importer_new.import_dragon_enhanced, and that
-  implementation opens the workbook with pandas, then iterates through sheets and rows building XML trees step by step
-  without any parallelism constructs (obs_scrubber_light.py:83 and dragon_importer_new.py:228).
-  - Because the only signaling is PyQt’s default pyqtSignal between widgets, nothing ever hops off the GUI thread, so
-  performance gains from multi-threading are currently unavailable and heavy imports will block the interface.
+TODO: MULTI-THREADED? Speed up Processing and Preview Hierarchy Model on slower systems?
 
-  If you want faster throughput, the natural next steps are: 1) move the costly pandas/XML work in on_import/on_browse
-  into a QThread or QtConcurrent worker so the UI stays responsive, and 2) only once that works, consider splitting
-  workbook sheets across worker threads or processes (e.g., ThreadPoolExecutor or multiprocessing) if pandas’ own
-  vectorization is not sufficient.
-
-
-> Bypassing the GIL wouldn’t help much here. The heavy work—pandas parsing, NumPy math inside pandas, and lxml tree
-  building—already drops into C extensions that release the GIL while they crunch data. The Python portion (looping
-  rows, wiring XML) is I/O-bound and sequential by design, so even if you used multiple interpreter threads they’d
-  contend on shared state (the XML trees, progress bookkeeping) and add synchronization overhead. Real speedups would
-  come from splitting the job into independent chunks and farming them out to separate processes (each with its own
-  interpreter) or reworking the importer so the C-heavy parts can run in parallel on different slices of the workbook.
 
 
 
