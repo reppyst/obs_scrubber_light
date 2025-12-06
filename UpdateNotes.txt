@@ -24,6 +24,18 @@ COMPLETED: Work on an Expanded Preview Hiearchy Model. Providing Capability to c
 
 COMPLETED: Capability to create entitycomposition and add under a unit in Preview Hierarchy Model, Role is user input and unique. ClassName based on available entities in EntityCompositionClassList. Need to make sure ID is generated and unique. LvcId is generated and unique. OwningFederate selection. UnitSuperior is populated based on placement. IsInactive, IsTransferrable, IsInvincible with true or false options. Can create multiple based on number desired, keep things unique.
 
+COMPLETED: Create Entity Composition dialog now hides munitions (DisCode kind=2) by default, with a “Show munitions” toggle to include them in the class picker when needed.
+
+COMPLETED: Added a “Duplicate unit subtree...” option in the Preview Model context menu. It clones the selected unit plus all subordinate units/entities, generates fresh IDs/LvcIds, and reuses the mass-rename dialog so you can supply the new naming scheme up front.
+
+COMPLETED: Added a Mass-rename dialog to the Preview Model (right-click a unit). You can edit prefix fields per unit, apply custom templates with tokens like {prefix1}, {suffix1}, {extra}, and optionally rename subordinate entity compositions with automatic numbering.
+
+TODO: Cleanup unwanted imports such as PyQt5, setuptools.
+
+TODO: Explore conversion to PySide6 rather than PyQt6
+
+TODO: Explore LDIF import options.
+
 TODO: MULTI-THREADED? Speed up Processing and Preview Hierarchy Model on slower systems?
 
 

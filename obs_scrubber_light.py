@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sys, traceback, zipfile, random, string, time, copy, csv
+import sys, traceback, zipfile, random, string, time, copy, csv, re
 
 from datetime import datetime
 
@@ -73,6 +73,8 @@ except Exception:
     import xml.etree.ElementTree as ET  # type: ignore
 
     LXML = False
+
+__version__ = "1.0.9"
 
 JTDS_NS = "https://jtds.jten.mil"
 
@@ -2603,7 +2605,7 @@ class CreateEntityDialog(QDialog):
         self._parent_unit = parent_unit
         self._result: Optional[_NewEntityData] = None
         self._existing_roles = self._collect_existing_roles(parent_unit)
-        self._class_entries = self._collect_entity_classes()
+        self._all_class_entries = self._collect_entity_classes()
         self._parent_lvc = (text(jfind(parent_unit, "j:LvcId")) or "").strip()
         self._parent_side = (text(jfind(parent_unit, "j:SideSuperior")) or "").strip()
         self.setWindowTitle("Create Entity Composition")
@@ -2623,11 +2625,14 @@ class CreateEntityDialog(QDialog):
         self.class_combo = QComboBox()
         self.class_combo.setEditable(True)
         self.class_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        if self._class_entries:
-            self.class_combo.addItem("")
-            for entry in self._class_entries:
-                self.class_combo.addItem(entry["label"], entry)
         form.addRow("Class Name", self.class_combo)
+        self.include_munitions_check = QCheckBox(
+            "Include munitions (DisCode kind=2)"
+        )
+        self.include_munitions_check.setChecked(False)
+        self.include_munitions_check.toggled.connect(self._on_include_munitions_toggled)
+        form.addRow("Show munitions", self.include_munitions_check)
+        self._rebuild_class_combo()
         self.qty_spin = QSpinBox()
         self.qty_spin.setRange(1, 100000)
         self.qty_spin.setValue(1)
@@ -2675,9 +2680,51 @@ class CreateEntityDialog(QDialog):
             if upper in seen:
                 continue
             seen.add(upper)
-            results.append({"label": label, "element": child})
+            discode = next((node for node in list(child) if _local(node.tag) == "DisCode"), None)
+            if discode is None:
+                discode = next((node for node in _iter_local(child, "DisCode")), None)
+            kind_attr = None
+            if discode is not None:
+                kind_attr = discode.get("kind") or discode.get("Kind")
+            results.append(
+                {
+                    "label": label,
+                    "element": child,
+                    "is_munition": kind_attr == "2",
+                }
+            )
         results.sort(key=lambda entry: entry["label"].upper())
         return results
+
+    def _filtered_class_entries(self) -> List[Dict[str, Any]]:
+        entries = list(self._all_class_entries)
+        if self.include_munitions_check.isChecked():
+            return entries
+        return [entry for entry in entries if not entry.get("is_munition")]
+
+    def _rebuild_class_combo(self) -> None:
+        current_label = None
+        current_entry = self.class_combo.currentData()
+        if isinstance(current_entry, dict):
+            current_label = current_entry.get("label")
+        current_text = (self.class_combo.currentText() or "").strip()
+        entries = self._filtered_class_entries()
+        self.class_combo.blockSignals(True)
+        self.class_combo.clear()
+        self.class_combo.addItem("")
+        index_to_select = 0
+        for entry in entries:
+            self.class_combo.addItem(entry["label"], entry)
+            if current_label and entry["label"] == current_label:
+                index_to_select = self.class_combo.count() - 1
+        if index_to_select:
+            self.class_combo.setCurrentIndex(index_to_select)
+        elif current_text and not current_label:
+            self.class_combo.setEditText(current_text)
+        self.class_combo.blockSignals(False)
+
+    def _on_include_munitions_toggled(self, _: bool) -> None:
+        self._rebuild_class_combo()
 
     def _collect_existing_roles(self, parent_unit: ET._Element) -> Set[str]:
         roles: Set[str] = set()
@@ -2740,6 +2787,8 @@ class ModelPreviewDialog(QDialog):
         super().__init__(parent)
         self._model: Optional[ObsModel] = None
         self._last_consolidation_label: Optional[str] = None
+        self._cached_lvc_to_unit: Optional[Dict[str, ET._Element]] = None
+        self._cached_parent_to_children: Optional[Dict[str, List[ET._Element]]] = None
         self.setWindowTitle("Model Hierarchy Preview")
         self.resize(720, 560)
         layout = QVBoxLayout(self)
@@ -2778,12 +2827,33 @@ class ModelPreviewDialog(QDialog):
         btn_box.rejected.connect(self.reject)
         layout.addWidget(btn_box)
 
+    def _invalidate_unit_cache(self) -> None:
+        self._cached_lvc_to_unit = None
+        self._cached_parent_to_children = None
+
+    def _ensure_unit_maps(
+        self,
+    ) -> Tuple[Dict[str, ET._Element], Dict[str, List[ET._Element]]]:
+        if self._model is None:
+            return {}, {}
+        if (
+            self._cached_lvc_to_unit is None
+            or self._cached_parent_to_children is None
+        ):
+            self._cached_lvc_to_unit, self._cached_parent_to_children = (
+                collect_unit_maps(self._model)
+            )
+        return self._cached_lvc_to_unit, self._cached_parent_to_children
+
     def set_model(self, model: Optional[ObsModel]) -> None:
         self._model = model
+        self._invalidate_unit_cache()
         self.tree.clear()
         if model is None:
             return
         lvc_to_unit, parent_to_children = collect_unit_maps(model)
+        self._cached_lvc_to_unit = dict(lvc_to_unit)
+        self._cached_parent_to_children = dict(parent_to_children)
         ec_by_superior: Dict[str, List[ET._Element]] = {}
         orphan_ec: Dict[str, List[Tuple[ET._Element, str]]] = {}
         side_labels: Dict[str, str] = {}
@@ -2959,6 +3029,8 @@ class ModelPreviewDialog(QDialog):
         move_action = None
         create_action = None
         create_entity_action = None
+        mass_rename_action = None
+        duplicate_action = None
         if len(selected_items) == 1:
             kind, _ = selected_items[0]
             if kind == "unit":
@@ -2966,10 +3038,12 @@ class ModelPreviewDialog(QDialog):
                 move_action = menu.addAction("Move unit...")
                 create_action = menu.addAction("Add subordinate unit...")
                 create_entity_action = menu.addAction("Add entity composition...")
+                mass_rename_action = menu.addAction("Mass rename subtree...")
+                duplicate_action = menu.addAction("Duplicate unit subtree...")
             elif kind == "entity":
                 rename_action = menu.addAction("Rename entity composition...")
                 move_action = menu.addAction("Move entity to unit...")
-            if rename_action or move_action or create_action:
+            if rename_action or move_action or create_action or duplicate_action:
                 menu.addSeparator()
         delete_action = None
         consolidate_action = None
@@ -3010,6 +3084,12 @@ class ModelPreviewDialog(QDialog):
             return
         if rename_action is not None and chosen == rename_action:
             self._handle_rename_request(selected_items[0])
+            return
+        if mass_rename_action is not None and chosen == mass_rename_action:
+            self._handle_mass_rename_subtree(selected_items[0][1])
+            return
+        if duplicate_action is not None and chosen == duplicate_action:
+            self._handle_duplicate_subtree(selected_items[0][1])
             return
         if move_action is not None and chosen == move_action:
             self._handle_move_request(selected_items[0])
@@ -3159,6 +3239,145 @@ class ModelPreviewDialog(QDialog):
         if changed:
             self.set_model(self._model)
 
+    def _collect_unit_name_set(
+        self, *, exclude_ids: Optional[Set[int]] = None
+    ) -> Set[str]:
+        names: Set[str] = set()
+        if self._model is None:
+            return names
+        for unit in _iter_local(self._model.unit_list, "Unit"):
+            if exclude_ids and id(unit) in exclude_ids:
+                continue
+            value = (text(jfind(unit, "j:Name")) or "").strip()
+            if value:
+                names.add(value.upper())
+        return names
+
+    def _open_mass_rename_dialog(
+        self,
+        unit_elem: ET._Element,
+        *,
+        existing_names: Set[str],
+        context_text: Optional[str] = None,
+    ) -> Optional[_MassRenameResult]:
+        if self._model is None:
+            return None
+        unit_maps = self._ensure_unit_maps()
+        dialog = MassRenameDialog(
+            self,
+            self._model,
+            unit_elem,
+            existing_unit_names=existing_names,
+            context_text=context_text,
+            unit_maps=unit_maps,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.result()
+
+    def _handle_mass_rename_subtree(self, unit_elem: ET._Element) -> None:
+        if self._model is None or unit_elem is None:
+            return
+        _, parent_to_children = self._ensure_unit_maps()
+        scope_units = _gather_unit_descendants(
+            unit_elem, parent_to_children, include_root=True
+        )
+        scope_ids = {id(u) for u in scope_units}
+        existing_names = self._collect_unit_name_set(exclude_ids=scope_ids)
+        result = self._open_mass_rename_dialog(
+            unit_elem, existing_names=existing_names
+        )
+        if result is None:
+            return
+        units_changed = 0
+        for target, new_name in result.unit_names.items():
+            name_el = jfind(target, "j:Name")
+            if name_el is None:
+                name_el = ET.SubElement(target, jtag("Name"))
+            if (name_el.text or "").strip() != new_name:
+                name_el.text = new_name
+                units_changed += 1
+        entities_changed = 0
+        for entity, new_role in result.entity_names.items():
+            role_el = jfind(entity, "j:Role")
+            if role_el is None:
+                role_el = ET.SubElement(entity, jtag("Role"))
+            if (role_el.text or "").strip() != new_role:
+                role_el.text = new_role
+                entities_changed += 1
+        if units_changed == 0 and entities_changed == 0:
+            QMessageBox.information(
+                self,
+                "Mass Rename",
+                "No unit or entity names were changed.",
+            )
+            return
+        summary_parts = []
+        if units_changed:
+            summary_parts.append(f"units: {units_changed}")
+        if entities_changed:
+            summary_parts.append(f"entities: {entities_changed}")
+        self.set_model(self._model)
+        self._select_tree_item_for_unit(unit_elem)
+        QMessageBox.information(
+                self,
+                "Mass Rename",
+                "Updated " + ", ".join(summary_parts) + ".",
+            )
+
+    def _handle_duplicate_subtree(self, unit_elem: ET._Element) -> None:
+        if self._model is None or unit_elem is None:
+            return
+        lvc_map, parent_to_children = self._ensure_unit_maps()
+        subtree_units = _gather_unit_descendants(
+            unit_elem, parent_to_children, include_root=True
+        )
+        if not subtree_units:
+            QMessageBox.information(
+                self, "Duplicate Unit", "No units were found under the selection."
+            )
+            return
+        subtree_root = subtree_units[0]
+        duplicates_allowed = self._collect_unit_name_set(exclude_ids=None)
+        context_text = (
+            "Configure the names for the duplicated units and their entity compositions. "
+            "The original units remain unchanged."
+        )
+        rename_plan = self._open_mass_rename_dialog(
+            unit_elem, existing_names=duplicates_allowed, context_text=context_text
+        )
+        if rename_plan is None:
+            return
+        subtree_lvc: Set[str] = set()
+        for unit in subtree_units:
+            lvc = (text(jfind(unit, "j:LvcId")) or "").strip()
+            if lvc:
+                subtree_lvc.add(lvc)
+        subtree_entities: List[ET._Element] = []
+        if subtree_lvc and self._model.entcomp_list is not None:
+            for ec in _iter_local(self._model.entcomp_list, "EntityComposition"):
+                sup = (text(jfind(ec, "j:UnitSuperior")) or "").strip()
+                if sup and sup in subtree_lvc:
+                    subtree_entities.append(ec)
+        root_clone, unit_count, entity_count = self._duplicate_subtree_elements(
+            subtree_units,
+            subtree_entities,
+            rename_plan.all_unit_names,
+            rename_plan.all_entity_names,
+        )
+        if root_clone is None or unit_count == 0:
+            QMessageBox.warning(
+                self, "Duplicate Unit", "Failed to duplicate the selected unit."
+            )
+            return
+        self.set_model(self._model)
+        self._select_tree_item_for_unit(root_clone)
+        QMessageBox.information(
+            self,
+            "Duplicate Unit",
+            f"Duplicated {unit_count} unit(s) and {entity_count} entity composition(s).",
+        )
+
     def _rename_unit(self, unit_elem: ET._Element) -> bool:
         name_el = jfind(unit_elem, "j:Name")
         old_name = (
@@ -3184,7 +3403,7 @@ class ModelPreviewDialog(QDialog):
             old_base, _ = _split_unit_name_components(old_name)
         new_base, _ = _split_unit_name_components(new_name)
         if old_base and new_base and old_base.upper() != new_base.upper():
-            _, parent_to_children = collect_unit_maps(self._model)
+            _, parent_to_children = self._ensure_unit_maps()
             for descendant in _gather_unit_descendants(unit_elem, parent_to_children):
                 name_node = jfind(descendant, "j:Name")
                 if name_node is None or not name_node.text:
@@ -3233,6 +3452,96 @@ class ModelPreviewDialog(QDialog):
             f"Renamed entity composition to '{new_role}'.",
         )
         return True
+
+    def _duplicate_subtree_elements(
+        self,
+        subtree_units: List[ET._Element],
+        subtree_entities: List[ET._Element],
+        name_plan: Dict[ET._Element, str],
+        entity_plan: Dict[ET._Element, str],
+    ) -> Tuple[Optional[ET._Element], int, int]:
+        if self._model is None:
+            return None, 0, 0
+        ent_list = self._model.entcomp_list
+        if ent_list is None:
+            ent_list = ET.SubElement(self._model.scenario, jtag("EntityCompositionList"))
+            self._model.entcomp_list = ent_list
+        used_ids, used_lvc = self._collect_used_identifiers()
+        orig_to_clone: Dict[ET._Element, ET._Element] = {}
+        orig_lvc_to_new: Dict[str, str] = {}
+        new_root: Optional[ET._Element] = None
+        units_created = 0
+        for unit in subtree_units:
+            clone = clone_element(unit)
+            target_name = name_plan.get(unit)
+            if not target_name:
+                target_name = (text(jfind(unit, "j:Name")) or "").strip() or "Unit"
+            name_el = jfind(clone, "j:Name")
+            if name_el is None:
+                name_el = ET.SubElement(clone, jtag("Name"))
+            name_el.text = target_name
+            unit_id = clone.get("id")
+            if not unit_id or unit_id in used_ids:
+                unit_id = _gen_unit_xml_id(used_ids)
+                clone.set("id", unit_id)
+            used_ids.add(unit_id)
+            clone.set("dateTimeStamp", _now_iso_seconds_no_tz())
+            lvc_el = jfind(clone, "j:LvcId")
+            new_lvc = _gen_unique_lvcid("U", used_lvc)
+            if lvc_el is None:
+                lvc_el = ET.SubElement(clone, jtag("LvcId"))
+            lvc_el.text = new_lvc
+            used_lvc.add(new_lvc)
+            orig_lvc = (text(jfind(unit, "j:LvcId")) or "").strip()
+            if orig_lvc:
+                orig_lvc_to_new[orig_lvc] = new_lvc
+            orig_to_clone[unit] = clone
+            if new_root is None:
+                new_root = clone
+            sup_el = jfind(clone, "j:UnitSuperior")
+            sup_val = (
+                (sup_el.text or "").strip() if sup_el is not None and sup_el.text else ""
+            )
+            if sup_val and sup_val in orig_lvc_to_new:
+                if sup_el is None:
+                    sup_el = ET.SubElement(clone, jtag("UnitSuperior"))
+                sup_el.text = orig_lvc_to_new[sup_val]
+            units_created += 1
+            self._model.unit_list.append(clone)
+        entities_created = 0
+        if subtree_entities:
+            for entity in subtree_entities:
+                sup = (text(jfind(entity, "j:UnitSuperior")) or "").strip()
+                if not sup or sup not in orig_lvc_to_new:
+                    continue
+                clone = clone_element(entity)
+                target_role = entity_plan.get(entity)
+                if not target_role:
+                    target_role = (text(jfind(entity, "j:Role")) or "").strip()
+                if not target_role:
+                    target_role = "ENTITY"
+                role_el = jfind(clone, "j:Role")
+                if role_el is None:
+                    role_el = ET.SubElement(clone, jtag("Role"))
+                role_el.text = target_role
+                entity_id = clone.get("id")
+                if not entity_id or entity_id in used_ids:
+                    entity_id = _gen_unit_xml_id(used_ids)
+                    clone.set("id", entity_id)
+                used_ids.add(entity_id)
+                lvc_el = jfind(clone, "j:LvcId")
+                new_lvc = _gen_unique_lvcid("E", used_lvc)
+                if lvc_el is None:
+                    lvc_el = ET.SubElement(clone, jtag("LvcId"))
+                lvc_el.text = new_lvc
+                used_lvc.add(new_lvc)
+                sup_el = jfind(clone, "j:UnitSuperior")
+                if sup_el is None:
+                    sup_el = ET.SubElement(clone, jtag("UnitSuperior"))
+                sup_el.text = orig_lvc_to_new.get(sup, sup)
+                ent_list.append(clone)
+                entities_created += 1
+        return new_root, units_created, entities_created
 
     def _handle_move_request(self, payload: Tuple[str, ET._Element]) -> None:
         if self._model is None:
@@ -3386,7 +3695,7 @@ class ModelPreviewDialog(QDialog):
         parent_lvc = self._ensure_unit_lvc(parent_unit, used_lvc)
         side_value = data.side_value
         if not side_value:
-            lvc_to_unit, _ = collect_unit_maps(self._model)
+            lvc_to_unit, _ = self._ensure_unit_maps()
             derived = _resolve_unit_side(parent_unit, lvc_to_unit)
             side_value = derived
         if self._model is None:
@@ -3566,7 +3875,7 @@ class ModelPreviewDialog(QDialog):
         return created
 
     def _apply_side_to_subtree(self, unit_elem: ET._Element, side_value: str) -> int:
-        _, parent_to_children = collect_unit_maps(self._model)
+        _, parent_to_children = self._ensure_unit_maps()
         nodes = _gather_unit_descendants(
             unit_elem, parent_to_children, include_root=True
         )
@@ -3883,6 +4192,609 @@ class ModelPreviewDialog(QDialog):
         ws.column_dimensions.group("B", "B", outline_level=1, hidden=False)
         wb.save(path)
 
+
+@dataclass
+class _MassRenameUnitRow:
+
+    unit: ET._Element
+    parent_index: Optional[int]
+    depth: int
+    prefix1: str
+    prefix2: str
+    prefix3: str
+    prefix4: str
+    original_name: str
+    echelon: str
+    side: str
+    lvcid: str
+    preview_name: str = ""
+
+
+@dataclass
+class _MassRenameEntityRow:
+
+    entity: ET._Element
+    unit_index: int
+    original_role: str
+    class_name: str
+    quantity: str
+    preview_name: str = ""
+
+
+@dataclass
+class _MassRenameResult:
+
+    unit_names: Dict[ET._Element, str]
+    entity_names: Dict[ET._Element, str]
+    all_unit_names: Dict[ET._Element, str]
+    all_entity_names: Dict[ET._Element, str]
+
+
+class MassRenameDialog(QDialog):
+
+    UNIT_TEMPLATE_DEFAULT = (
+        "{prefix1}_{prefix2}_{prefix3}_{prefix4}_{suffix1}_{suffix2}_{suffix3}_{suffix4}"
+    )
+    ENTITY_TEMPLATE_DEFAULT = (
+        "{class_slug}_{unit_prefix1}_{unit_prefix2}_{unit_prefix3}_{unit_suffix1}_{extra}"
+    )
+
+    def __init__(
+        self,
+        parent: Optional[QWidget],
+        model: ObsModel,
+        root_unit: ET._Element,
+        *,
+        existing_unit_names: Set[str],
+        context_text: Optional[str] = None,
+        unit_maps: Optional[
+            Tuple[Dict[str, ET._Element], Dict[str, List[ET._Element]]]
+        ] = None,
+    ):
+        super().__init__(parent)
+        self._model = model
+        self._root_unit = root_unit
+        self._existing_unit_names = {name.upper() for name in existing_unit_names}
+        self._unit_maps = unit_maps
+        self._rows: List[_MassRenameUnitRow] = self._build_unit_rows()
+        (
+            self._entity_rows,
+            self._entities_by_unit,
+        ) = self._build_entity_rows()
+        self._result: Optional[_MassRenameResult] = None
+        self._block_table = False
+        self._current_error: Optional[str] = None
+        self._context_text = context_text
+        self.setWindowTitle("Mass Rename Units and Entities")
+        self.resize(920, 640)
+        self._build_ui()
+        self._refresh_previews()
+
+    def result(self) -> Optional[_MassRenameResult]:
+        return self._result
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        intro = self._context_text or (
+            "Provide prefix values for each unit, adjust the template, and preview the "
+            "result before applying the rename. Blank prefix or suffix tokens automatically "
+            "drop extra underscores so names stay tidy."
+        )
+        help_label = QLabel(intro)
+        help_label.setWordWrap(True)
+        layout.addWidget(help_label)
+        template_group = QGroupBox("Templates")
+        form = QFormLayout(template_group)
+        self.unit_template_edit = QLineEdit(self.UNIT_TEMPLATE_DEFAULT)
+        self.unit_template_edit.textChanged.connect(self._refresh_previews)
+        form.addRow("Unit template", self.unit_template_edit)
+        self.unit_numbering_check = QCheckBox(
+            "Always number duplicates (include {extra} starting at 1)"
+        )
+        self.unit_numbering_check.setChecked(False)
+        self.unit_numbering_check.toggled.connect(self._refresh_previews)
+        form.addRow("", self.unit_numbering_check)
+        self.rename_entities_check = QCheckBox("Rename entity compositions")
+        self.rename_entities_check.setChecked(bool(self._entity_rows))
+        self.rename_entities_check.toggled.connect(self._refresh_previews)
+        form.addRow("", self.rename_entities_check)
+        self.entity_template_edit = QLineEdit(self.ENTITY_TEMPLATE_DEFAULT)
+        self.entity_template_edit.textChanged.connect(self._refresh_previews)
+        form.addRow("Entity template", self.entity_template_edit)
+        self.entity_numbering_check = QCheckBox(
+            "Always number duplicate entity names"
+        )
+        self.entity_numbering_check.setChecked(True)
+        self.entity_numbering_check.toggled.connect(self._refresh_previews)
+        form.addRow("", self.entity_numbering_check)
+        layout.addWidget(template_group)
+        token_info = QLabel(
+            "Unit tokens: {prefix1}, {prefix2}, {prefix3}, {prefix4}, "
+            "{suffix1}, {suffix2}, {suffix3}, {suffix4}, {echelon}, {side}, {lvcid}, "
+            "{original_name}, {depth}, {index}, {extra}. "
+            "Entity tokens: {role}, {class_name}, {class_slug}, {quantity}, {unit_name}, "
+            "{unit_prefix1}, {unit_prefix2}, {unit_prefix3}, {unit_prefix4}, "
+            "{unit_suffix1}, {unit_suffix2}, {unit_suffix3}, {unit_suffix4}, "
+            "{unit_echelon}, {unit_original_name}, {unit_depth}, "
+            "{unit_entity_index}, {extra}."
+        )
+        token_info.setWordWrap(True)
+        layout.addWidget(token_info)
+        self.table = QTableWidget()
+        self.table.setColumnCount(8)
+        self.table.setHorizontalHeaderLabels(
+            [
+                "Level",
+                "Current Name",
+                "Echelon",
+                "Prefix 1",
+                "Prefix 2",
+                "Prefix 3",
+                "Prefix 4",
+                "Preview",
+            ]
+        )
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.itemChanged.connect(self._handle_table_change)
+        layout.addWidget(self.table)
+        self._populate_unit_table()
+        self.entity_preview = QTextEdit()
+        self.entity_preview.setReadOnly(True)
+        self.entity_preview.setMinimumHeight(120)
+        layout.addWidget(self.entity_preview)
+        self._status_label = QLabel("")
+        self._status_label.setStyleSheet("color: red;")
+        layout.addWidget(self._status_label)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+
+    def _populate_unit_table(self) -> None:
+        self._block_table = True
+        self.table.setRowCount(len(self._rows))
+        for idx, row in enumerate(self._rows):
+            level_item = QTableWidgetItem(str(row.depth))
+            level_item.setFlags(level_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(idx, 0, level_item)
+            indent = "  " * row.depth
+            display_name = row.original_name or "Unnamed Unit"
+            name_item = QTableWidgetItem(f"{indent}{display_name}")
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(idx, 1, name_item)
+            echelon_item = QTableWidgetItem(row.echelon)
+            echelon_item.setFlags(echelon_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(idx, 2, echelon_item)
+            for col, value in zip(
+                (3, 4, 5, 6),
+                (row.prefix1, row.prefix2, row.prefix3, row.prefix4),
+            ):
+                item = QTableWidgetItem(value)
+                self.table.setItem(idx, col, item)
+            preview_item = QTableWidgetItem("")
+            preview_item.setFlags(preview_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(idx, 7, preview_item)
+        self._block_table = False
+
+    def _handle_table_change(self, item: QTableWidgetItem) -> None:
+        if self._block_table:
+            return
+        row_idx = item.row()
+        col = item.column()
+        if row_idx < 0 or row_idx >= len(self._rows):
+            return
+        if col not in (3, 4, 5, 6):
+            return
+        value = (item.text() or "").strip()
+        target = self._rows[row_idx]
+        if col == 3:
+            target.prefix1 = value
+        elif col == 4:
+            target.prefix2 = value
+        elif col == 5:
+            target.prefix3 = value
+        else:
+            target.prefix4 = value
+        self._refresh_previews()
+
+    def _refresh_previews(self) -> None:
+        self._current_error = None
+        unit_template = (self.unit_template_edit.text() or "").strip()
+        if not unit_template:
+            unit_template = self.UNIT_TEMPLATE_DEFAULT
+        try:
+            contexts = []
+            base_names = []
+            for idx, row in enumerate(self._rows):
+                context = self._unit_context(idx)
+                contexts.append(context)
+                base_value = self._format_template(unit_template, {**context, "extra": ""})
+                if not base_value.strip():
+                    raise ValueError("Unit template produced an empty name.")
+                base_names.append(base_value.strip())
+        except ValueError as exc:
+            self._set_error(str(exc))
+            return
+        extras = self._assign_extras(
+            base_names, force_numbering=self.unit_numbering_check.isChecked()
+        )
+        for idx, row in enumerate(self._rows):
+            context = dict(contexts[idx])
+            context["extra"] = extras[idx]
+            try:
+                preview = self._format_template(unit_template, context).strip()
+            except ValueError as exc:
+                self._set_error(str(exc))
+                return
+            row.preview_name = preview
+            preview_item = self.table.item(idx, 7)
+            if preview_item is not None:
+                preview_item.setText(preview)
+        if not self._update_entity_preview():
+            return
+        self._set_error(None)
+
+    def _set_error(self, message: Optional[str]) -> None:
+        self._current_error = message
+        if message:
+            self._status_label.setText(message)
+            if hasattr(self, "_ok_button") and self._ok_button is not None:
+                self._ok_button.setEnabled(False)
+        else:
+            self._status_label.setText("")
+            if hasattr(self, "_ok_button") and self._ok_button is not None:
+                self._ok_button.setEnabled(True)
+
+    def _update_entity_preview(self) -> bool:
+        if not self._entity_rows or not self.rename_entities_check.isChecked():
+            for row in self._entity_rows:
+                fallback = (
+                    row.original_role
+                    or self._slugify(row.class_name)
+                    or row.class_name
+                    or "ENTITY"
+                )
+                row.preview_name = fallback
+            self.entity_preview.setPlainText("Entity rename disabled.")
+            return True
+        template = (self.entity_template_edit.text() or "").strip()
+        if not template:
+            template = self.ENTITY_TEMPLATE_DEFAULT
+        lines: List[str] = []
+        for unit_index, entity_indices in self._entities_by_unit.items():
+            base_names: List[str] = []
+            contexts = []
+            rows = []
+            for ordinal, entity_idx in enumerate(entity_indices, start=1):
+                row = self._entity_rows[entity_idx]
+                rows.append(row)
+                context = self._entity_context(row, unit_index, ordinal)
+                contexts.append(context)
+                try:
+                    candidate = self._format_template(
+                        template, {**context, "extra": ""}
+                    )
+                except ValueError as exc:
+                    self._set_error(str(exc))
+                    return False
+                fallback = candidate or (
+                    self._slugify(row.class_name)
+                    or self._slugify(row.original_role)
+                    or row.original_role
+                    or "ENTITY"
+                )
+                base_names.append(fallback)
+            extras = self._assign_extras(
+                base_names, force_numbering=self.entity_numbering_check.isChecked()
+            )
+            for ctx, extra, row, base_name in zip(contexts, extras, rows, base_names):
+                ctx = dict(ctx)
+                ctx["extra"] = extra
+                try:
+                    preview = self._format_template(template, ctx).strip()
+                except ValueError as exc:
+                    self._set_error(str(exc))
+                    return False
+                if not preview:
+                    preview = base_name
+                row.preview_name = preview
+                unit_display = self._rows[unit_index].preview_name or (
+                    self._rows[unit_index].original_name or "Unit"
+                )
+                lines.append(f"{unit_display} -> {row.original_role} => {preview}")
+        self.entity_preview.setPlainText("\n".join(lines) if lines else "No entities.")
+        return True
+
+    def accept(self) -> None:
+        if self._current_error:
+            QMessageBox.warning(self, "Mass Rename", self._current_error)
+            return
+        proposed_units: Dict[ET._Element, str] = {}
+        all_units: Dict[ET._Element, str] = {}
+        used = set(self._existing_unit_names)
+        for row in self._rows:
+            new_name = (row.preview_name or "").strip()
+            if not new_name:
+                QMessageBox.warning(
+                    self, "Mass Rename", "All units must have a non-empty name."
+                )
+                return
+            upper = new_name.upper()
+            if upper in used:
+                QMessageBox.warning(
+                    self,
+                    "Mass Rename",
+                    f"Name '{new_name}' conflicts with another unit in the model.",
+                )
+                return
+            used.add(upper)
+            all_units[row.unit] = new_name
+            if new_name != (row.original_name or ""):
+                proposed_units[row.unit] = new_name
+        proposed_entities: Dict[ET._Element, str] = {}
+        all_entities: Dict[ET._Element, str] = {}
+        if self._entity_rows and self.rename_entities_check.isChecked():
+            for unit_index, entity_indices in self._entities_by_unit.items():
+                seen: Set[str] = set()
+                for entity_idx in entity_indices:
+                    row = self._entity_rows[entity_idx]
+                    new_role = (row.preview_name or "").strip()
+                    if not new_role:
+                        QMessageBox.warning(
+                            self,
+                            "Mass Rename",
+                            "All renamed entity compositions must have a non-empty role.",
+                        )
+                        return
+                    upper = new_role.upper()
+                    if upper in seen:
+                        QMessageBox.warning(
+                            self,
+                            "Mass Rename",
+                            "Duplicate entity role detected under the same unit. "
+                            "Adjust the template or prefixes to ensure uniqueness.",
+                        )
+                        return
+                    seen.add(upper)
+                    all_entities[row.entity] = new_role
+                    if new_role != (row.original_role or ""):
+                        proposed_entities[row.entity] = new_role
+        else:
+            for row in self._entity_rows:
+                fallback = (
+                    (row.preview_name or "").strip()
+                    or row.original_role
+                    or self._slugify(row.class_name)
+                    or row.class_name
+                    or "ENTITY"
+                )
+                all_entities[row.entity] = fallback
+        self._result = _MassRenameResult(
+            proposed_units, proposed_entities, all_units, all_entities
+        )
+        super().accept()
+
+    def _unit_context(self, index: int) -> Dict[str, Any]:
+        row = self._rows[index]
+        parent_prefix = ("", "", "", "")
+        if row.parent_index is not None and 0 <= row.parent_index < len(self._rows):
+            parent = self._rows[row.parent_index]
+            parent_prefix = (
+                parent.prefix1,
+                parent.prefix2,
+                parent.prefix3,
+                parent.prefix4,
+            )
+        return {
+            "prefix1": row.prefix1,
+            "prefix2": row.prefix2,
+            "prefix3": row.prefix3,
+            "prefix4": row.prefix4,
+            "suffix1": parent_prefix[0],
+            "suffix2": parent_prefix[1],
+            "suffix3": parent_prefix[2],
+            "suffix4": parent_prefix[3],
+            "original_name": row.original_name,
+            "echelon": row.echelon,
+            "side": row.side,
+            "lvcid": row.lvcid,
+            "depth": row.depth,
+            "index": index + 1,
+            "unit_name": row.preview_name or row.original_name,
+        }
+
+    def _entity_context(
+        self, row: _MassRenameEntityRow, unit_index: int, ordinal: int
+    ) -> Dict[str, Any]:
+        unit_row = self._rows[unit_index]
+        parent_prefix = ("", "", "", "")
+        if (
+            unit_row.parent_index is not None
+            and 0 <= unit_row.parent_index < len(self._rows)
+        ):
+            parent = self._rows[unit_row.parent_index]
+            parent_prefix = (
+                parent.prefix1,
+                parent.prefix2,
+                parent.prefix3,
+                parent.prefix4,
+            )
+        return {
+            "role": row.original_role,
+            "class_name": row.class_name,
+            "class_slug": self._slugify(row.class_name),
+            "quantity": row.quantity,
+            "unit_name": unit_row.preview_name or unit_row.original_name,
+            "unit_prefix1": unit_row.prefix1,
+            "unit_prefix2": unit_row.prefix2,
+            "unit_prefix3": unit_row.prefix3,
+            "unit_prefix4": unit_row.prefix4,
+            "unit_suffix1": parent_prefix[0],
+            "unit_suffix2": parent_prefix[1],
+            "unit_suffix3": parent_prefix[2],
+            "unit_suffix4": parent_prefix[3],
+            "unit_echelon": unit_row.echelon,
+            "unit_original_name": unit_row.original_name,
+            "unit_depth": unit_row.depth,
+            "unit_entity_index": ordinal,
+        }
+
+    def _build_unit_rows(self) -> List[_MassRenameUnitRow]:
+        rows: List[_MassRenameUnitRow] = []
+        if self._model is None or self._model.unit_list is None:
+            return rows
+        if self._unit_maps is not None:
+            _, parent_to_children = self._unit_maps
+        else:
+            _, parent_to_children = collect_unit_maps(self._model)
+        queue: List[Tuple[ET._Element, Optional[int], int]] = [
+            (self._root_unit, None, 0)
+        ]
+        seen: Set[int] = set()
+        while queue:
+            unit, parent_index, depth = queue.pop(0)
+            key = id(unit)
+            if key in seen:
+                continue
+            seen.add(key)
+            name = (text(jfind(unit, "j:Name")) or "").strip()
+            echelon = (text(jfind(unit, "j:Echelon")) or "").strip()
+            side = (text(jfind(unit, "j:SideSuperior")) or "").strip()
+            lvcid = (text(jfind(unit, "j:LvcId")) or "").strip()
+            prefix = self._guess_prefix_tokens(name)
+            row = _MassRenameUnitRow(
+                unit=unit,
+                parent_index=parent_index,
+                depth=depth,
+                prefix1=prefix[0],
+                prefix2=prefix[1],
+                prefix3=prefix[2],
+                prefix4=prefix[3],
+                original_name=name,
+                echelon=echelon,
+                side=side,
+                lvcid=lvcid,
+            )
+            rows.append(row)
+            current_index = len(rows) - 1
+            children = []
+            if lvcid:
+                children = parent_to_children.get(lvcid, [])
+            for child in sorted(children, key=unit_sort_key):
+                queue.append((child, current_index, depth + 1))
+        return rows
+
+    def _build_entity_rows(
+        self,
+    ) -> Tuple[List[_MassRenameEntityRow], Dict[int, List[int]]]:
+        if self._model is None or self._model.entcomp_list is None:
+            return [], {}
+        lvc_to_index: Dict[str, int] = {}
+        for idx, row in enumerate(self._rows):
+            if row.lvcid:
+                lvc_to_index[row.lvcid] = idx
+        buckets: Dict[int, List[ET._Element]] = defaultdict(list)
+        for ec in _iter_local(self._model.entcomp_list, "EntityComposition"):
+            sup = (text(jfind(ec, "j:UnitSuperior")) or "").strip()
+            if not sup:
+                continue
+            owner_index = lvc_to_index.get(sup)
+            if owner_index is None:
+                continue
+            buckets[owner_index].append(ec)
+        rows: List[_MassRenameEntityRow] = []
+        mapping: Dict[int, List[int]] = defaultdict(list)
+        for owner_index in range(len(self._rows)):
+            entries = buckets.get(owner_index)
+            if not entries:
+                continue
+            for ec in sorted(entries, key=self._entity_sort_key_for_row):
+                role = (text(jfind(ec, "j:Role")) or "").strip()
+                class_name = (text(jfind(ec, "j:ClassName")) or "").strip()
+                quantity = (text(jfind(ec, "j:Quantity")) or "").strip()
+                row = _MassRenameEntityRow(
+                    entity=ec,
+                    unit_index=owner_index,
+                    original_role=role,
+                    class_name=class_name,
+                    quantity=quantity,
+                )
+                mapping[owner_index].append(len(rows))
+                rows.append(row)
+        return rows, mapping
+
+    def _entity_sort_key_for_row(self, ec: ET._Element) -> Tuple[str, str]:
+        role = (text(jfind(ec, "j:Role")) or "").strip().lower()
+        lvc = (text(jfind(ec, "j:LvcId")) or "").strip()
+        return (role, lvc)
+
+    @staticmethod
+    def _assign_extras(
+        names: List[str], *, force_numbering: bool
+    ) -> List[str]:
+        totals: Dict[str, int] = defaultdict(int)
+        for name in names:
+            totals[name] += 1
+        counters: Dict[str, int] = defaultdict(int)
+        extras: List[str] = []
+        for name in names:
+            counters[name] += 1
+            total = totals[name]
+            order = counters[name]
+            if total == 1 and not force_numbering:
+                extras.append("")
+            elif order == 1 and not force_numbering:
+                extras.append("")
+            else:
+                extras.append(str(order))
+        return extras
+
+    @staticmethod
+    def _guess_prefix_tokens(name: str) -> Tuple[str, str, str, str]:
+        cleaned = name.replace("-", "_") if name else ""
+        tokens = [tok for tok in cleaned.split("_") if tok]
+        p1 = tokens[0] if len(tokens) > 0 else ""
+        p2 = tokens[1] if len(tokens) > 1 else ""
+        p3 = tokens[2] if len(tokens) > 2 else ""
+        p4 = tokens[3] if len(tokens) > 3 else ""
+        return (p1, p2, p3, p4)
+
+    @staticmethod
+    def _format_template(template: str, context: Dict[str, Any]) -> str:
+        formatter = string.Formatter()
+        safe = defaultdict(str, context)  # type: ignore[arg-type]
+        try:
+            rendered = formatter.vformat(template, (), safe)
+        except Exception as exc:
+            raise ValueError(str(exc)) from exc
+        return MassRenameDialog._cleanup_value(rendered)
+
+    @staticmethod
+    def _cleanup_value(value: str) -> str:
+        if not value:
+            return ""
+        text = value.strip()
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"_+", "_", text)
+        text = text.strip("_ ").strip()
+        return text
+
+    @staticmethod
+    def _slugify(value: Optional[str]) -> str:
+        if not value:
+            return ""
+        text = value.strip()
+        if not text:
+            return ""
+        text = re.sub(r"[^0-9A-Za-z]+", "_", text)
+        return text.strip("_")
 
 class ObsUnitSelectionDialog(QDialog):
 
