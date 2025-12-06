@@ -12,13 +12,13 @@ import pandas as pd, math
 
 from dataclasses import dataclass
 
-from typing import Any, Dict, List, Optional, Set, Tuple, Iterable, Callable
+from typing import Any, Dict, List, Optional, Set, Tuple, Iterable, Callable, Mapping
 
 from collections import defaultdict
 
-from PyQt6.QtCore import Qt, QObject, QThread, pyqtSignal, pyqtSlot
+from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication,
     QWidget,
     QTabWidget,
@@ -74,7 +74,7 @@ except Exception:
 
     LXML = False
 
-__version__ = "1.0.9"
+__version__ = "1.12"
 
 JTDS_NS = "https://jtds.jten.mil"
 
@@ -127,6 +127,13 @@ def jtag(local: str) -> str:
 
 def text(elem: Optional[ET._Element]) -> Optional[str]:
     return elem.text if elem is not None else None
+
+
+def _normalize_user_data(value: Any) -> Any:
+    """Ensure tuples stored via Qt item data survive PySide (which returns lists)."""
+    if isinstance(value, list):
+        return tuple(value)
+    return value
 
 
 def _indent_xml(elem: ET.Element, level: int = 0) -> None:
@@ -777,6 +784,16 @@ _DISCODE_ATTRS = (
     "subcategory",
     "specific",
     "extra",
+)
+
+_UNIT_DIS_ENUM_ATTRS = (
+    "kind",
+    "domain",
+    "country",
+    "echelon",
+    "type",
+    "subtype",
+    "modifier",
 )
 
 # Branch detection (token-based)
@@ -1727,6 +1744,38 @@ def _parse_dis_enum_to_attrs(enum_str: str) -> Dict[str, str]:
     return attrs
 
 
+def _parse_unit_dis_enum_to_attrs(enum_str: str) -> Dict[str, str]:
+
+    text_val = (enum_str or "").strip()
+    if not text_val:
+        raise ValueError("Enter a UnitDisEnumeration value.")
+    parts = [part.strip() for part in text_val.split(".")]
+    if len(parts) != len(_UNIT_DIS_ENUM_ATTRS):
+        raise ValueError(
+            "UnitDisEnumeration must contain 7 dot-separated integers (kind.domain.country.echelon.type.subtype.modifier)."
+        )
+    attrs: Dict[str, str] = {}
+    for key, value in zip(_UNIT_DIS_ENUM_ATTRS, parts):
+        if not value or not value.isdigit():
+            raise ValueError(
+                f"UnitDisEnumeration component '{value or ''}' for '{key}' must be numeric."
+            )
+        attrs[key] = str(int(value))
+    return attrs
+
+
+def _format_unit_dis_enum(attrs: Mapping[str, str]) -> str:
+
+    parts: List[str] = []
+    for key in _UNIT_DIS_ENUM_ATTRS:
+        raw = attrs.get(key, "")
+        norm = _normalize_discode_component(raw) if raw else ""
+        parts.append(norm)
+    while parts and not parts[-1]:
+        parts.pop()
+    return ".".join(parts)
+
+
 def import_dragon_xlsx_into_model(
     xlsx_path: str,
     model: Optional[ObsModel],
@@ -2007,7 +2056,7 @@ def build_unitclass_list_from_xlsx(model: ObsModel, ucl_xlsx_path: str) -> int:
                 raw_enum = None
             enum_val = str(raw_enum).strip() if raw_enum is not None else ""
             if enum_val:
-                attrs = _parse_dis_enum_to_attrs(enum_val)
+                attrs = _parse_unit_dis_enum_to_attrs(enum_val)
                 ude = ET.SubElement(ucl, jtag("UnitDisEnumeration"))
                 for k, v in attrs.items():
                     ude.set(k, str(v))
@@ -2021,7 +2070,7 @@ def build_unitclass_list_from_xlsx(model: ObsModel, ucl_xlsx_path: str) -> int:
 
 class AnalyzerTab(QWidget):
 
-    modelLoaded = pyqtSignal(object)
+    modelLoaded = Signal(object)
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -3015,7 +3064,7 @@ class ModelPreviewDialog(QDialog):
             item.setSelected(True)
         selected_items: List[Tuple[str, ET._Element]] = []
         for candidate in self.tree.selectedItems():
-            data = candidate.data(0, Qt.ItemDataRole.UserRole)
+            data = _normalize_user_data(candidate.data(0, Qt.ItemDataRole.UserRole))
             if isinstance(data, tuple) and data:
                 kind = data[0]
                 if kind in ("unit", "entity"):
@@ -3795,7 +3844,7 @@ class ModelPreviewDialog(QDialog):
             return
 
         def visit(item: QTreeWidgetItem) -> bool:
-            data = item.data(0, Qt.ItemDataRole.UserRole)
+            data = _normalize_user_data(item.data(0, Qt.ItemDataRole.UserRole))
             if isinstance(data, tuple) and data[0] == "unit" and data[1] is target:
                 self.tree.setCurrentItem(item)
                 self.tree.scrollToItem(item)
@@ -4122,7 +4171,7 @@ class ModelPreviewDialog(QDialog):
                 if not include_hidden and child.isHidden():
                     continue
                 texts = [child.text(col) for col in range(columns)]
-                data = child.data(0, Qt.ItemDataRole.UserRole)
+                data = _normalize_user_data(child.data(0, Qt.ItemDataRole.UserRole))
                 if isinstance(data, str):
                     kind = "side"
                 elif isinstance(data, tuple) and data:
@@ -4986,14 +5035,16 @@ class ObsUnitSelectionDialog(QDialog):
             refresh(self.tree.topLevelItem(i))
 
     def _collect_roots(self, item: QTreeWidgetItem, out: Set[ET._Element]) -> None:
-        data = item.data(0, Qt.ItemDataRole.UserRole)
+        data = _normalize_user_data(item.data(0, Qt.ItemDataRole.UserRole))
         state = item.checkState(0)
         parent = item.parent()
         parent_checked = (
             parent.checkState(0) if parent is not None else Qt.CheckState.Unchecked
         )
         parent_data = (
-            parent.data(0, Qt.ItemDataRole.UserRole) if parent is not None else None
+            _normalize_user_data(parent.data(0, Qt.ItemDataRole.UserRole))
+            if parent is not None
+            else None
         )
         if isinstance(data, ET._Element) and state == Qt.CheckState.Checked:
             if (
@@ -5420,7 +5471,7 @@ class ObsMoveUnitDialog(QDialog):
         if current is None:
             self._status.setText("")
             return
-        data = current.data(0, Qt.ItemDataRole.UserRole)
+        data = _normalize_user_data(current.data(0, Qt.ItemDataRole.UserRole))
         if not isinstance(data, tuple):
             self._status.setText("")
             return
@@ -5440,7 +5491,7 @@ class ObsMoveUnitDialog(QDialog):
         if current is None:
             QMessageBox.information(self, "Move", "Select a destination.")
             return
-        data = current.data(0, Qt.ItemDataRole.UserRole)
+        data = _normalize_user_data(current.data(0, Qt.ItemDataRole.UserRole))
         if not isinstance(data, tuple):
             QMessageBox.information(self, "Move", "Select a valid destination.")
             return
@@ -5471,6 +5522,17 @@ class ObsMoveUnitDialog(QDialog):
 class _EntityClassRowMeta:
 
     element: Optional[ET._Element]
+    alias_element: Optional[ET._Element]
+    alias_federate: Optional[str]
+    is_new: bool
+
+
+@dataclass
+class _UnitClassRowMeta:
+
+    element: Optional[ET._Element]
+    alias_element: Optional[ET._Element]
+    alias_federate: Optional[str]
     is_new: bool
 
 
@@ -5481,6 +5543,8 @@ class EntityClassesTab(QWidget):
         self.model: Optional[ObsModel] = None
         self._row_meta: Dict[str, _EntityClassRowMeta] = {}
         self._new_row_seq = 0
+        self._federate_label_all = "All Federates"
+        self._refreshing_federate_combo = False
         self._build()
 
     def _build(self):
@@ -5490,6 +5554,17 @@ class EntityClassesTab(QWidget):
         )
         self.info_label.setWordWrap(True)
         outer.addWidget(self.info_label)
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Federate filter:"))
+        self.federate_combo = QComboBox()
+        self.federate_combo.setEditable(True)
+        self.federate_combo.lineEdit().setPlaceholderText(self._federate_label_all)
+        self.federate_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.federate_combo.addItem(self._federate_label_all)
+        self.federate_combo.currentTextChanged.connect(self._on_federate_filter_changed)
+        filter_row.addWidget(self.federate_combo)
+        filter_row.addStretch()
+        outer.addLayout(filter_row)
         controls = QHBoxLayout()
         self.btn_refresh = QPushButton("Reload")
         self.btn_refresh.clicked.connect(self._reload_table)
@@ -5540,13 +5615,61 @@ class EntityClassesTab(QWidget):
             self.sort_combo,
             self.btn_sort,
             self.table,
+            self.federate_combo,
         ]:
             widget.setEnabled(enabled)
+
+    def _current_federate_filter(self) -> Optional[str]:
+        text = self.federate_combo.currentText().strip()
+        if not text or text.lower() == self._federate_label_all.lower():
+            return None
+        return text
+
+    def _on_federate_filter_changed(self, _text: str) -> None:
+        if self._refreshing_federate_combo:
+            return
+        self._reload_table()
+
+    def _collect_federate_names(self) -> List[str]:
+        names: Set[str] = set()
+        if not self.model:
+            return []
+        ecc_parent = jfind(self.model.classdata, jtag("EntityCompositionClassList"))
+        if ecc_parent is None:
+            return []
+        for alias in _iter_local(ecc_parent, "Alias"):
+            fed = text(jfind(alias, "j:Federate"))
+            if fed:
+                names.add(fed.strip())
+        return sorted(names, key=lambda s: s.upper())
+
+    def _refresh_federate_combo(self) -> None:
+        options = self._collect_federate_names()
+        current_text = self.federate_combo.currentText().strip()
+        self._refreshing_federate_combo = True
+        block = self.federate_combo.blockSignals(True)
+        self.federate_combo.clear()
+        self.federate_combo.addItem(self._federate_label_all)
+        for name in options:
+            self.federate_combo.addItem(name)
+        if current_text and current_text.lower() != self._federate_label_all.lower():
+            idx = self.federate_combo.findText(
+                current_text, Qt.MatchFlag.MatchFixedString
+            )
+            if idx >= 0:
+                self.federate_combo.setCurrentIndex(idx)
+            else:
+                self.federate_combo.setEditText(current_text)
+        else:
+            self.federate_combo.setCurrentIndex(0)
+        self.federate_combo.blockSignals(block)
+        self._refreshing_federate_combo = False
 
     def set_model(self, model: Optional[ObsModel]):
         self.model = model
         has_model = model is not None
         self._set_enabled(has_model)
+        self._refresh_federate_combo()
         if has_model:
             self._reload_table()
         else:
@@ -5576,7 +5699,18 @@ class EntityClassesTab(QWidget):
             self.status_label.setText("0 entity classes loaded.")
             self.table.setSortingEnabled(True)
             return
-        rows: List[Tuple[str, str, str, str, ET._Element]] = []
+        federate_filter = self._current_federate_filter()
+        rows: List[
+            Tuple[
+                str,
+                str,
+                str,
+                str,
+                ET._Element,
+                Optional[ET._Element],
+                Optional[str],
+            ]
+        ] = []
         seen: Set[str] = set()
         for ecc in list(ecc_parent):
             if _local(ecc.tag) != "EntityCompositionClass":
@@ -5588,12 +5722,46 @@ class EntityClassesTab(QWidget):
             if key in seen:
                 continue
             seen.add(key)
-            federate, typename = self._extract_alias_values(ecc)
             discode = self._extract_discode(ecc)
-            rows.append((name, federate, typename, discode, ecc))
+            if federate_filter:
+                alias = self._find_alias_for_federate(ecc, federate_filter)
+                federate_val, typename_val = self._alias_fields(alias)
+                rows.append(
+                    (
+                        name,
+                        federate_val,
+                        typename_val,
+                        discode,
+                        ecc,
+                        alias,
+                        federate_filter,
+                    )
+                )
+            else:
+                federate_val, typename_val, alias = self._extract_alias_values(ecc)
+                rows.append(
+                    (
+                        name,
+                        federate_val,
+                        typename_val,
+                        discode,
+                        ecc,
+                        alias,
+                        federate_val or None,
+                    )
+                )
         rows.sort(key=lambda item: item[0].upper())
-        for name, federate, typename, discode, ecc in rows:
-            self._append_row(name, federate, typename, discode, ecc, is_new=False)
+        for name, federate, typename, discode, ecc, alias_elem, alias_fed in rows:
+            self._append_row(
+                name,
+                federate,
+                typename,
+                discode,
+                ecc,
+                is_new=False,
+                alias_element=alias_elem,
+                alias_federate=alias_fed,
+            )
         self.table.setSortingEnabled(True)
         self.info_label.setText(
             "Edit Federate, TypeName, and DisCode values. Add rows to create new EntityCompositionClasses."
@@ -5615,6 +5783,8 @@ class EntityClassesTab(QWidget):
         element: Optional[ET._Element],
         *,
         is_new: bool,
+        alias_element: Optional[ET._Element] = None,
+        alias_federate: Optional[str] = None,
     ) -> None:
         row = self.table.rowCount()
         self.table.insertRow(row)
@@ -5627,10 +5797,16 @@ class EntityClassesTab(QWidget):
         for col, value in enumerate([federate, typename, discode], start=1):
             item = QTableWidgetItem(value or "")
             self.table.setItem(row, col, item)
-        self._row_meta[key] = _EntityClassRowMeta(element=element, is_new=is_new)
+        self._row_meta[key] = _EntityClassRowMeta(
+            element=element,
+            alias_element=alias_element,
+            alias_federate=alias_federate,
+            is_new=is_new,
+        )
 
     def _table_rows(self) -> List[Tuple[str, str, str, str]]:
         rows: List[Tuple[str, str, str, str]] = []
+        federate_filter = self._current_federate_filter()
         for row in range(self.table.rowCount()):
             name_item = self.table.item(row, 0)
             fed_item = self.table.item(row, 1)
@@ -5638,6 +5814,8 @@ class EntityClassesTab(QWidget):
             discode_item = self.table.item(row, 3)
             name = (name_item.text() if name_item else "").strip()
             federate = (fed_item.text() if fed_item else "").strip()
+            if federate_filter:
+                federate = federate_filter
             typename = (type_item.text() if type_item else "").strip()
             discode = (discode_item.text() if discode_item else "").strip()
             rows.append((name, federate, typename, discode))
@@ -5690,20 +5868,19 @@ class EntityClassesTab(QWidget):
                 return child.text.strip()
         return ""
 
-    def _extract_alias_values(self, ecc: ET._Element) -> Tuple[str, str]:
+    def _first_alias(self, ecc: ET._Element) -> Optional[ET._Element]:
         alias_list = jfind(ecc, "j:AliasList")
-        alias = None
         if alias_list is not None:
             for child in list(alias_list):
                 if _local(child.tag) == "Alias":
-                    alias = child
-                    break
-        if alias is None:
-            alias = next((child for child in _iter_local(ecc, "Alias")), None)
-        if alias is None:
-            return "", ""
+                    return child
+        return next((child for child in _iter_local(ecc, "Alias")), None)
+
+    def _alias_fields(self, alias: Optional[ET._Element]) -> Tuple[str, str]:
         federate = ""
         typename = ""
+        if alias is None:
+            return federate, typename
         fed_elem = next(
             (child for child in list(alias) if _local(child.tag) == "Federate" and child.text),
             None,
@@ -5717,6 +5894,36 @@ class EntityClassesTab(QWidget):
         if type_elem is not None:
             typename = type_elem.text.strip()
         return federate, typename
+
+    def _alias_map(self, ecc: ET._Element) -> Dict[str, ET._Element]:
+        mapping: Dict[str, ET._Element] = {}
+        alias_list = jfind(ecc, "j:AliasList")
+        candidates: List[ET._Element] = []
+        if alias_list is not None:
+            for child in list(alias_list):
+                if _local(child.tag) == "Alias":
+                    candidates.append(child)
+        else:
+            candidates.extend(_iter_local(ecc, "Alias"))
+        for alias in candidates:
+            federate = (text(jfind(alias, "j:Federate")) or "").strip()
+            if federate:
+                mapping[federate.upper()] = alias
+        return mapping
+
+    def _find_alias_for_federate(
+        self, ecc: ET._Element, federate: Optional[str]
+    ) -> Optional[ET._Element]:
+        if not federate:
+            return None
+        return self._alias_map(ecc).get(federate.strip().upper())
+
+    def _extract_alias_values(
+        self, ecc: ET._Element
+    ) -> Tuple[str, str, Optional[ET._Element]]:
+        alias = self._first_alias(ecc)
+        federate, typename = self._alias_fields(alias)
+        return federate, typename, alias
 
     def _find_discode_element(self, ecc: ET._Element) -> Optional[ET._Element]:
         for child in list(ecc):
@@ -5739,7 +5946,15 @@ class EntityClassesTab(QWidget):
     def _on_add_row(self) -> None:
         if not self.model:
             return
-        self._append_row("", "", "", "", None, is_new=True)
+        self._append_row(
+            "",
+            "",
+            "",
+            "",
+            None,
+            is_new=True,
+            alias_federate=self._current_federate_filter(),
+        )
         self.status_label.setText(
             f"{self.table.rowCount()} row(s) in table. New rows require a Name before saving."
         )
@@ -5800,6 +6015,7 @@ class EntityClassesTab(QWidget):
                 "Load or create a JTDS OBS model before importing.",
             )
             return
+        filter_value = self._current_federate_filter()
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Import Entity Classes",
@@ -5913,6 +6129,7 @@ class EntityClassesTab(QWidget):
                         entry["discode"],
                         None,
                         is_new=True,
+                        alias_federate=filter_value,
                     )
                     created += 1
         finally:
@@ -5930,6 +6147,7 @@ class EntityClassesTab(QWidget):
                 preview += "\n..."
             summary += f"\nWarnings:\n{preview}"
         QMessageBox.information(self, "Import Entity Classes", summary)
+        self._refresh_federate_combo()
 
     def _ensure_child_text(self, parent: ET._Element, tag: str, value: str) -> ET._Element:
         node = jfind(parent, f"j:{tag}")
@@ -5938,17 +6156,30 @@ class EntityClassesTab(QWidget):
         node.text = value
         return node
 
-    def _update_alias(self, ecc: ET._Element, federate: str, typename: str) -> None:
+    def _update_alias(
+        self,
+        ecc: ET._Element,
+        federate: str,
+        typename: str,
+        *,
+        alias_element: Optional[ET._Element],
+        target_federate: Optional[str],
+    ) -> None:
         alias_list = jfind(ecc, "j:AliasList")
         if alias_list is None:
             alias_list = ET.SubElement(ecc, jtag("AliasList"))
-        alias = jfind(alias_list, "j:Alias")
+        alias = alias_element
+        desired_federate = target_federate or federate
+        if target_federate:
+            alias = alias or self._find_alias_for_federate(ecc, target_federate)
+        if alias is None:
+            alias = jfind(alias_list, "j:Alias")
         if alias is None:
             alias = ET.SubElement(alias_list, jtag("Alias"))
         fed = jfind(alias, "j:Federate")
         if fed is None:
             fed = ET.SubElement(alias, jtag("Federate"))
-        fed.text = federate or None
+        fed.text = desired_federate or None
         tname = jfind(alias, "j:TypeName")
         if tname is None:
             tname = ET.SubElement(alias, jtag("TypeName"))
@@ -5973,7 +6204,7 @@ class EntityClassesTab(QWidget):
             item = self.table.item(row, 0)
             if not item:
                 continue
-            key = item.data(Qt.ItemDataRole.UserRole)
+            key = _normalize_user_data(item.data(Qt.ItemDataRole.UserRole))
             if key is None:
                 continue
             meta = self._row_meta.get(key)
@@ -6001,13 +6232,19 @@ class EntityClassesTab(QWidget):
             name_item = self.table.item(row, 0)
             if name_item is None:
                 continue
-            key = name_item.data(Qt.ItemDataRole.UserRole)
+            key = _normalize_user_data(name_item.data(Qt.ItemDataRole.UserRole))
             meta = self._row_meta.get(key)
             if not meta:
                 continue
             name = (name_item.text() or "").strip()
             fed_item = self.table.item(row, 1)
             federate = (fed_item.text() if fed_item else "").strip()
+            filter_value = self._current_federate_filter()
+            if filter_value:
+                federate = filter_value
+            filter_value = self._current_federate_filter()
+            if filter_value:
+                federate = filter_value
             type_item = self.table.item(row, 2)
             typename = (type_item.text() if type_item else "").strip()
             discode_item = self.table.item(row, 3)
@@ -6059,7 +6296,14 @@ class EntityClassesTab(QWidget):
                 updated += 1
             if meta.element is None:
                 continue
-            self._update_alias(meta.element, federate, typename)
+            alias_target = filter_value or meta.alias_federate or federate
+            self._update_alias(
+                meta.element,
+                federate,
+                typename,
+                alias_element=meta.alias_element,
+                target_federate=alias_target,
+            )
             self._update_discode(meta.element, discode_attrs)
         if errors:
             preview = "\n".join(errors[:5])
@@ -6073,7 +6317,781 @@ class EntityClassesTab(QWidget):
             f"EntityCompositionClass changes saved. Updated {updated}, created {created}.",
         )
         self._reload_table()
+        self._refresh_federate_combo()
 
+
+class UnitClassesTab(QWidget):
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.model: Optional[ObsModel] = None
+        self._row_meta: Dict[str, _UnitClassRowMeta] = {}
+        self._new_row_seq = 0
+        self._federate_label_all = "All Federates"
+        self._refreshing_federate_combo = False
+        self._build()
+
+    def _build(self):
+        outer = QVBoxLayout(self)
+        self.info_label = QLabel(
+            "Load or create a JTDS OBS model to view UnitClass entries."
+        )
+        self.info_label.setWordWrap(True)
+        outer.addWidget(self.info_label)
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Federate filter:"))
+        self.federate_combo = QComboBox()
+        self.federate_combo.setEditable(True)
+        self.federate_combo.lineEdit().setPlaceholderText(self._federate_label_all)
+        self.federate_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.federate_combo.addItem(self._federate_label_all)
+        self.federate_combo.currentTextChanged.connect(self._on_federate_filter_changed)
+        filter_row.addWidget(self.federate_combo)
+        filter_row.addStretch()
+        outer.addLayout(filter_row)
+        controls = QHBoxLayout()
+        self.btn_refresh = QPushButton("Reload")
+        self.btn_refresh.clicked.connect(self._reload_table)
+        self.btn_add = QPushButton("Add Row")
+        self.btn_add.clicked.connect(self._on_add_row)
+        self.btn_save = QPushButton("Save Changes")
+        self.btn_save.clicked.connect(self._on_save)
+        self.btn_import = QPushButton("Import CSV...")
+        self.btn_import.clicked.connect(self._on_import)
+        self.btn_export = QPushButton("Export CSV...")
+        self.btn_export.clicked.connect(self._on_export)
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(["AggregateName (A-Z)", "2525C Code (A-Z)"])
+        self.btn_sort = QPushButton("Sort")
+        self.btn_sort.clicked.connect(self._on_sort)
+        controls.addWidget(self.btn_refresh)
+        controls.addWidget(self.btn_add)
+        controls.addWidget(self.btn_save)
+        controls.addWidget(self.btn_import)
+        controls.addWidget(self.btn_export)
+        controls.addWidget(QLabel("Sort by:"))
+        controls.addWidget(self.sort_combo)
+        controls.addWidget(self.btn_sort)
+        controls.addStretch()
+        outer.addLayout(controls)
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            [
+                "AggregateName",
+                "Federate",
+                "TypeName",
+                "2525C Code",
+                "UnitDisEnumeration",
+            ]
+        )
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.SelectedClicked
+        )
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        outer.addWidget(self.table)
+        self.status_label = QLabel("No model loaded.")
+        outer.addWidget(self.status_label)
+        self._set_enabled(False)
+
+    def _set_enabled(self, enabled: bool) -> None:
+        for widget in [
+            self.btn_refresh,
+            self.btn_add,
+            self.btn_save,
+            self.btn_import,
+            self.btn_export,
+            self.sort_combo,
+            self.btn_sort,
+            self.table,
+            self.federate_combo,
+        ]:
+            widget.setEnabled(enabled)
+
+    def _current_federate_filter(self) -> Optional[str]:
+        text = self.federate_combo.currentText().strip()
+        if not text or text.lower() == self._federate_label_all.lower():
+            return None
+        return text
+
+    def _on_federate_filter_changed(self, _text: str) -> None:
+        if self._refreshing_federate_combo:
+            return
+        self._reload_table()
+
+    def _collect_federate_names(self) -> List[str]:
+        names: Set[str] = set()
+        if not self.model:
+            return []
+        ucl_parent = jfind(self.model.classdata, jtag("UnitClassList"))
+        if ucl_parent is None:
+            return []
+        for alias in _iter_local(ucl_parent, "Alias"):
+            fed = text(jfind(alias, "j:Federate"))
+            if fed:
+                names.add(fed.strip())
+        return sorted(names, key=lambda s: s.upper())
+
+    def _refresh_federate_combo(self) -> None:
+        options = self._collect_federate_names()
+        current_text = self.federate_combo.currentText().strip()
+        self._refreshing_federate_combo = True
+        block = self.federate_combo.blockSignals(True)
+        self.federate_combo.clear()
+        self.federate_combo.addItem(self._federate_label_all)
+        for name in options:
+            self.federate_combo.addItem(name)
+        if current_text and current_text.lower() != self._federate_label_all.lower():
+            idx = self.federate_combo.findText(
+                current_text, Qt.MatchFlag.MatchFixedString
+            )
+            if idx >= 0:
+                self.federate_combo.setCurrentIndex(idx)
+            else:
+                self.federate_combo.setEditText(current_text)
+        else:
+            self.federate_combo.setCurrentIndex(0)
+        self.federate_combo.blockSignals(block)
+        self._refreshing_federate_combo = False
+
+    def set_model(self, model: Optional[ObsModel]):
+        self.model = model
+        has_model = model is not None
+        self._set_enabled(has_model)
+        self._refresh_federate_combo()
+        if has_model:
+            self._reload_table()
+        else:
+            self._clear_table()
+            self.info_label.setText(
+                "Load or create a JTDS OBS model to manage UnitClasses."
+            )
+            self.status_label.setText("No model loaded.")
+
+    def _clear_table(self) -> None:
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
+        self._row_meta.clear()
+        self.table.setSortingEnabled(True)
+
+    def _reload_table(self) -> None:
+        if not self.model:
+            return
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
+        self._row_meta.clear()
+        ucl_parent = jfind(self.model.classdata, jtag("UnitClassList"))
+        if ucl_parent is None:
+            self.info_label.setText(
+                "This model does not have a UnitClassList yet. Saving new rows will create it."
+            )
+            self.status_label.setText("0 unit classes loaded.")
+            self.table.setSortingEnabled(True)
+            return
+        federate_filter = self._current_federate_filter()
+        rows: List[
+            Tuple[
+                str,
+                str,
+                str,
+                str,
+                str,
+                ET._Element,
+                Optional[ET._Element],
+                Optional[str],
+            ]
+        ] = []
+        seen: Set[str] = set()
+        for ucl in list(ucl_parent):
+            if _local(ucl.tag) != "UnitClass":
+                continue
+            agg = self._extract_aggregate_name(ucl)
+            if not agg:
+                continue
+            key = agg.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            code = (text(jfind(ucl, "j:MilStd2525CCode")) or "").strip()
+            ude = self._extract_unit_dis_enum(ucl)
+            if federate_filter:
+                alias = self._find_alias_for_federate(ucl, federate_filter)
+                federate_val, typename_val = self._alias_fields(alias)
+                rows.append(
+                    (
+                        agg,
+                        federate_val,
+                        typename_val,
+                        code,
+                        ude,
+                        ucl,
+                        alias,
+                        federate_filter,
+                    )
+                )
+            else:
+                federate_val, typename_val, alias = self._extract_alias_values(ucl)
+                rows.append(
+                    (
+                        agg,
+                        federate_val,
+                        typename_val,
+                        code,
+                        ude,
+                        ucl,
+                        alias,
+                        federate_val or None,
+                    )
+                )
+        rows.sort(key=lambda item: item[0].upper())
+        for agg, federate, typename, code, ude, ucl, alias_elem, alias_fed in rows:
+            self._append_row(
+                agg,
+                federate,
+                typename,
+                code,
+                ude,
+                ucl,
+                is_new=False,
+                alias_element=alias_elem,
+                alias_federate=alias_fed,
+            )
+        self.table.setSortingEnabled(True)
+        self.info_label.setText(
+            "Edit Federate, TypeName, 2525C code, and UnitDisEnumeration values. Add rows to create new UnitClasses."
+        )
+        self.status_label.setText(f"{len(rows)} unit classes loaded.")
+
+    def _next_row_key(self, element: Optional[ET._Element]) -> str:
+        if element is not None:
+            return f"ucl-{id(element)}"
+        self._new_row_seq += 1
+        return f"new-{self._new_row_seq}"
+
+    def _append_row(
+        self,
+        name: str,
+        federate: str,
+        typename: str,
+        code2525: str,
+        unit_enum: str,
+        element: Optional[ET._Element],
+        *,
+        is_new: bool,
+        alias_element: Optional[ET._Element] = None,
+        alias_federate: Optional[str] = None,
+    ) -> None:
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        key = self._next_row_key(element)
+        name_item = QTableWidgetItem(name)
+        name_item.setData(Qt.ItemDataRole.UserRole, key)
+        if not is_new:
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        self.table.setItem(row, 0, name_item)
+        for col, value in enumerate([federate, typename, code2525, unit_enum], start=1):
+            item = QTableWidgetItem(value or "")
+            self.table.setItem(row, col, item)
+        self._row_meta[key] = _UnitClassRowMeta(
+            element=element,
+            alias_element=alias_element,
+            alias_federate=alias_federate,
+            is_new=is_new,
+        )
+
+    def _table_rows(self) -> List[Tuple[str, str, str, str, str]]:
+        rows: List[Tuple[str, str, str, str, str]] = []
+        federate_filter = self._current_federate_filter()
+        for row in range(self.table.rowCount()):
+            agg_item = self.table.item(row, 0)
+            fed_item = self.table.item(row, 1)
+            type_item = self.table.item(row, 2)
+            code_item = self.table.item(row, 3)
+            enum_item = self.table.item(row, 4)
+            agg = (agg_item.text() if agg_item else "").strip()
+            federate = (fed_item.text() if fed_item else "").strip()
+            if federate_filter:
+                federate = federate_filter
+            typename = (type_item.text() if type_item else "").strip()
+            code2525 = (code_item.text() if code_item else "").strip()
+            unit_enum = (enum_item.text() if enum_item else "").strip()
+            rows.append((agg, federate, typename, code2525, unit_enum))
+        return rows
+
+    def _name_to_row(self) -> Dict[str, int]:
+        mapping: Dict[str, int] = {}
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if not item:
+                continue
+            name = (item.text() or "").strip()
+            if not name:
+                continue
+            mapping[name.upper()] = row
+        return mapping
+
+    def _set_cell_text(self, row: int, column: int, value: str) -> None:
+        item = self.table.item(row, column)
+        if item is None:
+            item = QTableWidgetItem(value)
+            self.table.setItem(row, column, item)
+        else:
+            item.setText(value)
+
+    def _extract_aggregate_name(self, ucl: ET._Element) -> str:
+        agg = text(jfind(ucl, "j:AggregateName"))
+        if agg:
+            return agg.strip()
+        name = text(jfind(ucl, "j:Name"))
+        return name.strip() if name else ""
+
+    def _first_alias(self, node: ET._Element) -> Optional[ET._Element]:
+        alias_list = jfind(node, "j:AliasList")
+        if alias_list is not None:
+            for child in list(alias_list):
+                if _local(child.tag) == "Alias":
+                    return child
+        return next((child for child in _iter_local(node, "Alias")), None)
+
+    def _alias_fields(self, alias: Optional[ET._Element]) -> Tuple[str, str]:
+        federate = ""
+        typename = ""
+        if alias is None:
+            return federate, typename
+        fed_elem = next(
+            (child for child in list(alias) if _local(child.tag) == "Federate" and child.text),
+            None,
+        )
+        if fed_elem is not None:
+            federate = fed_elem.text.strip()
+        type_elem = next(
+            (child for child in list(alias) if _local(child.tag) == "TypeName" and child.text),
+            None,
+        )
+        if type_elem is not None:
+            typename = type_elem.text.strip()
+        return federate, typename
+
+    def _alias_map(self, node: ET._Element) -> Dict[str, ET._Element]:
+        mapping: Dict[str, ET._Element] = {}
+        alias_list = jfind(node, "j:AliasList")
+        candidates: List[ET._Element] = []
+        if alias_list is not None:
+            for child in list(alias_list):
+                if _local(child.tag) == "Alias":
+                    candidates.append(child)
+        else:
+            candidates.extend(_iter_local(node, "Alias"))
+        for alias in candidates:
+            federate = (text(jfind(alias, "j:Federate")) or "").strip()
+            if federate:
+                mapping[federate.upper()] = alias
+        return mapping
+
+    def _find_alias_for_federate(
+        self, node: ET._Element, federate: Optional[str]
+    ) -> Optional[ET._Element]:
+        if not federate:
+            return None
+        return self._alias_map(node).get(federate.strip().upper())
+
+    def _extract_alias_values(
+        self, node: ET._Element
+    ) -> Tuple[str, str, Optional[ET._Element]]:
+        alias = self._first_alias(node)
+        federate, typename = self._alias_fields(alias)
+        return federate, typename, alias
+
+    def _extract_unit_dis_enum(self, ucl: ET._Element) -> str:
+        ude = jfind(ucl, "j:UnitDisEnumeration")
+        if ude is None:
+            for child in list(ucl):
+                if _local(child.tag) == "UnitDisEnumeration":
+                    ude = child
+                    break
+        if ude is None:
+            return ""
+        attrs: Dict[str, str] = {}
+        for key in _UNIT_DIS_ENUM_ATTRS:
+            raw = ude.get(key, "")
+            if raw:
+                attrs[key] = raw
+        if not any(attrs.values()):
+            for key, legacy in zip(_UNIT_DIS_ENUM_ATTRS, _DISCODE_ATTRS):
+                raw = ude.get(legacy, "")
+                if raw:
+                    attrs[key] = raw
+        if not any(attrs.values()):
+            return ""
+        return _format_unit_dis_enum(attrs)
+
+    def _on_add_row(self) -> None:
+        if not self.model:
+            return
+        self._append_row(
+            "",
+            "",
+            "",
+            "",
+            "",
+            None,
+            is_new=True,
+            alias_federate=self._current_federate_filter(),
+        )
+        self.status_label.setText(
+            f"{self.table.rowCount()} row(s) in table. New rows require an AggregateName before saving."
+        )
+
+    def _on_sort(self) -> None:
+        column = 0 if self.sort_combo.currentIndex() == 0 else 3
+        self.table.sortItems(column)
+
+    def _on_export(self) -> None:
+        rows = self._table_rows()
+        if not rows:
+            QMessageBox.information(
+                self, "Export Unit Classes", "No rows to export."
+            )
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Unit Classes",
+            "UnitClasses.csv",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(
+                    ["AggregateName", "Federate", "TypeName", "2525C", "UnitDisEnumeration"]
+                )
+                for record in rows:
+                    writer.writerow(record)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Unit Classes", f"Failed to export: {exc}")
+            return
+        QMessageBox.information(
+            self,
+            "Export Unit Classes",
+            f"Exported {len(rows)} row(s) to {path}",
+        )
+
+    def _resolve_field_name(self, fieldnames: Optional[List[str]], target: str) -> Optional[str]:
+        if not fieldnames:
+            return None
+        normalized_target = target.replace(" ", "").lower()
+        for name in fieldnames:
+            normalized = name.replace(" ", "").lower()
+            if normalized == normalized_target:
+                return name
+        return None
+
+    def _on_import(self) -> None:
+        if not self.model:
+            QMessageBox.information(
+                self,
+                "Import Unit Classes",
+                "Load or create a JTDS OBS model before importing.",
+            )
+            return
+        filter_value = self._current_federate_filter()
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Unit Classes",
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", newline="", encoding="utf-8-sig") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = reader.fieldnames or []
+                name_field = self._resolve_field_name(fieldnames, "AggregateName")
+                if not name_field:
+                    raise ValueError("CSV is missing an 'AggregateName' column.")
+                fed_field = self._resolve_field_name(fieldnames, "Federate")
+                type_field = self._resolve_field_name(fieldnames, "TypeName")
+                code_field = self._resolve_field_name(fieldnames, "2525C")
+                enum_field = self._resolve_field_name(fieldnames, "UnitDisEnumeration")
+                incoming: List[Dict[str, str]] = []
+                seen_names: Set[str] = set()
+                issues: List[str] = []
+                line_num = 1
+                for row in reader:
+                    line_num += 1
+                    agg = (row.get(name_field) or "").strip()
+                    if not agg:
+                        issues.append(f"Row {line_num}: Missing AggregateName; skipped.")
+                        continue
+                    upper = agg.upper()
+                    if upper in seen_names:
+                        issues.append(
+                            f"Row {line_num}: Duplicate AggregateName '{agg}' within file; skipped."
+                        )
+                        continue
+                    federate = (
+                        (row.get(fed_field) or "").strip() if fed_field else ""
+                    )
+                    if filter_value:
+                        federate = filter_value
+                    typename = (
+                        (row.get(type_field) or "").strip() if type_field else ""
+                    )
+                    code2525 = (
+                        (row.get(code_field) or "").strip() if code_field else ""
+                    )
+                    enum_raw = (
+                        (row.get(enum_field) or "").strip() if enum_field else ""
+                    )
+                    enum_text = ""
+                    if enum_raw:
+                        try:
+                            enum_attrs = _parse_unit_dis_enum_to_attrs(enum_raw)
+                            enum_text = _format_unit_dis_enum(enum_attrs)
+                        except ValueError:
+                            issues.append(
+                                f"Row {line_num}: Invalid UnitDisEnumeration '{enum_raw}'; skipped."
+                            )
+                            continue
+                    incoming.append(
+                        {
+                            "name": agg,
+                            "name_upper": upper,
+                            "federate": federate,
+                            "typename": typename,
+                            "code2525": code2525,
+                            "enum_raw": enum_text,
+                        }
+                    )
+                    seen_names.add(upper)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Import Unit Classes", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Import Unit Classes", f"Failed to import: {exc}"
+            )
+            return
+        if not incoming:
+            msg = "No valid rows were imported."
+            if issues:
+                preview = "\n".join(issues[:5])
+                if len(issues) > 5:
+                    preview += "\n..."
+                msg += f"\nIssues:\n{preview}"
+            QMessageBox.information(self, "Import Unit Classes", msg)
+            return
+        name_to_row = self._name_to_row()
+        updated = 0
+        created = 0
+        sorting_prev = self.table.isSortingEnabled()
+        self.table.setSortingEnabled(False)
+        try:
+            for entry in incoming:
+                idx = name_to_row.get(entry["name_upper"])
+                if idx is not None:
+                    self._set_cell_text(idx, 1, entry["federate"])
+                    self._set_cell_text(idx, 2, entry["typename"])
+                    self._set_cell_text(idx, 3, entry["code2525"])
+                    self._set_cell_text(idx, 4, entry["enum_raw"])
+                    updated += 1
+                else:
+                    self._append_row(
+                        entry["name"],
+                        entry["federate"],
+                        entry["typename"],
+                        entry["code2525"],
+                        entry["enum_raw"],
+                        None,
+                        is_new=True,
+                        alias_federate=filter_value,
+                    )
+                    created += 1
+        finally:
+            self.table.setSortingEnabled(sorting_prev)
+        total_rows = self.table.rowCount()
+        self.status_label.setText(
+            f"Table now has {total_rows} row(s). Imported {created} new, updated {updated}."
+        )
+        summary = (
+            f"Import complete. Added {created} row(s), updated {updated} row(s)."
+        )
+        if issues:
+            preview = "\n".join(issues[:5])
+            if len(issues) > 5:
+                preview += "\n..."
+            summary += f"\nWarnings:\n{preview}"
+        QMessageBox.information(self, "Import Unit Classes", summary)
+        self._refresh_federate_combo()
+
+    def _ensure_child_text(self, parent: ET._Element, tag: str, value: str) -> ET._Element:
+        node = jfind(parent, f"j:{tag}")
+        if node is None:
+            node = ET.SubElement(parent, jtag(tag))
+        node.text = value
+        return node
+
+    def _update_alias(
+        self,
+        ucl: ET._Element,
+        federate: str,
+        typename: str,
+        *,
+        alias_element: Optional[ET._Element],
+        target_federate: Optional[str],
+    ) -> None:
+        alias_list = jfind(ucl, "j:AliasList")
+        if alias_list is None:
+            alias_list = ET.SubElement(ucl, jtag("AliasList"))
+        alias = alias_element
+        desired_federate = target_federate or federate
+        if target_federate:
+            alias = alias or self._find_alias_for_federate(ucl, target_federate)
+        if alias is None:
+            alias = jfind(alias_list, "j:Alias")
+        if alias is None:
+            alias = ET.SubElement(alias_list, jtag("Alias"))
+        fed = jfind(alias, "j:Federate")
+        if fed is None:
+            fed = ET.SubElement(alias, jtag("Federate"))
+        fed.text = desired_federate or None
+        tname = jfind(alias, "j:TypeName")
+        if tname is None:
+            tname = ET.SubElement(alias, jtag("TypeName"))
+        tname.text = typename or None
+
+    def _update_unit_dis_enum(
+        self, ucl: ET._Element, attrs: Optional[Dict[str, str]]
+    ) -> None:
+        ude = jfind(ucl, "j:UnitDisEnumeration")
+        if attrs is None or not attrs:
+            if ude is not None and ude in list(ucl):
+                ucl.remove(ude)
+            return
+        if ude is None:
+            ude = ET.SubElement(ucl, jtag("UnitDisEnumeration"))
+        for legacy in set(_DISCODE_ATTRS) - set(_UNIT_DIS_ENUM_ATTRS):
+            if legacy in ude.attrib:
+                del ude.attrib[legacy]
+        for key in _UNIT_DIS_ENUM_ATTRS:
+            value = attrs.get(key, "") if attrs else ""
+            if value:
+                ude.set(key, value)
+            elif key in ude.attrib:
+                del ude.attrib[key]
+
+    def _collect_existing_name_keys(self) -> Set[str]:
+        keys: Set[str] = set()
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if not item:
+                continue
+            key = _normalize_user_data(item.data(Qt.ItemDataRole.UserRole))
+            if key is None:
+                continue
+            meta = self._row_meta.get(key)
+            if not meta or meta.is_new:
+                continue
+            name = (item.text() or "").strip()
+            if name:
+                keys.add(name.upper())
+        return keys
+
+    def _on_save(self) -> None:
+        if not self.model:
+            return
+        ucl_parent = jfind(self.model.classdata, jtag("UnitClassList"))
+        if ucl_parent is None:
+            ucl_parent = ET.SubElement(self.model.classdata, jtag("UnitClassList"))
+        errors: List[str] = []
+        created = 0
+        updated = 0
+        existing_name_keys = self._collect_existing_name_keys()
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            if name_item is None:
+                continue
+            key = _normalize_user_data(name_item.data(Qt.ItemDataRole.UserRole))
+            meta = self._row_meta.get(key)
+            if not meta:
+                continue
+            aggregate = (name_item.text() or "").strip()
+            fed_item = self.table.item(row, 1)
+            federate = (fed_item.text() if fed_item else "").strip()
+            type_item = self.table.item(row, 2)
+            typename = (type_item.text() if type_item else "").strip()
+            code_item = self.table.item(row, 3)
+            code2525 = (code_item.text() if code_item else "").strip()
+            enum_item = self.table.item(row, 4)
+            enum_raw = (enum_item.text() if enum_item else "").strip()
+            enum_attrs: Optional[Dict[str, str]] = None
+            if enum_raw:
+                try:
+                    enum_attrs = _parse_unit_dis_enum_to_attrs(enum_raw)
+                except ValueError:
+                    errors.append(
+                        f"Row {row + 1}: UnitDisEnumeration must be 'kind.domain.country.echelon.type.subtype.modifier'."
+                    )
+                    continue
+            if meta.is_new:
+                if not aggregate:
+                    errors.append(
+                        f"Row {row + 1}: AggregateName is required for new entries."
+                    )
+                    continue
+                key_upper = aggregate.upper()
+                if key_upper in existing_name_keys:
+                    errors.append(
+                        f"Row {row + 1}: AggregateName '{aggregate}' already exists."
+                    )
+                    continue
+                existing_name_keys.add(key_upper)
+                ucl = ET.SubElement(ucl_parent, jtag("UnitClass"))
+                self._ensure_child_text(ucl, "AggregateName", aggregate)
+                meta.element = ucl
+                meta.is_new = False
+                created += 1
+            else:
+                ucl = meta.element
+                if ucl is None:
+                    continue
+                if aggregate:
+                    self._ensure_child_text(ucl, "AggregateName", aggregate)
+                updated += 1
+            if meta.element is None:
+                continue
+            if code2525:
+                self._ensure_child_text(meta.element, "MilStd2525CCode", code2525)
+            alias_target = filter_value or meta.alias_federate or federate
+            self._update_alias(
+                meta.element,
+                federate,
+                typename,
+                alias_element=meta.alias_element,
+                target_federate=alias_target,
+            )
+            self._update_unit_dis_enum(meta.element, enum_attrs)
+        if errors:
+            preview = "\n".join(errors[:5])
+            if len(errors) > 5:
+                preview += "\n..."
+            QMessageBox.warning(self, "Save Unit Classes", preview)
+            return
+        QMessageBox.information(
+            self,
+            "Save Unit Classes",
+            f"UnitClass changes saved. Updated {updated}, created {created}.",
+        )
+        self._reload_table()
+        self._refresh_federate_combo()
 
 class GenerateTab(QWidget):
 
@@ -6847,7 +7865,7 @@ class DragonUnitSelectionDialog(QDialog):
 
     def _collect_roots(self, item: QTreeWidgetItem, out: Set[str]) -> None:
         state = item.checkState(0)
-        uid = item.data(0, Qt.ItemDataRole.UserRole)
+        uid = _normalize_user_data(item.data(0, Qt.ItemDataRole.UserRole))
         if state == Qt.CheckState.Checked and uid:
             out.add(str(uid))
             return
@@ -6874,10 +7892,10 @@ class DragonUnitSelectionDialog(QDialog):
 
 class DragonImportWorker(QObject):
 
-    progress = pyqtSignal(str, float)
-    finished = pyqtSignal(object, int, int, bool)
-    failed = pyqtSignal(str)
-    cancelled = pyqtSignal()
+    progress = Signal(str, float)
+    finished = Signal(object, int, int, bool)
+    failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(
         self,
@@ -6901,7 +7919,7 @@ class DragonImportWorker(QObject):
     def _is_cancelled(self) -> bool:
         return self._cancel_requested
 
-    @pyqtSlot()
+    @Slot()
     def run(self) -> None:
         try:
             self.progress.emit("Preparing import...", 0.0)
@@ -6940,7 +7958,7 @@ class DragonImportWorker(QObject):
 
 class ImportDragonTab(QWidget):
 
-    modelImported = pyqtSignal(object)
+    modelImported = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -7509,7 +8527,7 @@ class MainWindow(QWidget):
         super().__init__()
         self._license_payload = license_payload
         self.setWindowTitle(
-            "ObsScrubber - JTDS OBS XML Analyzer/Scrubber/Generator/Importer"
+            f"OBS Scrubber Light v{__version__} - JTDS OBS XML Analyzer/Scrubber/Generator/Importer"
         )
         self.resize(1080, 720)
         self.tabs = QTabWidget()
@@ -7517,12 +8535,14 @@ class MainWindow(QWidget):
         self.tab_sc = ScrubberTab(self)
         self.tab_ge = GenerateTab(self)
         self.tab_ecc = EntityClassesTab(self)
+        self.tab_ucl = UnitClassesTab(self)
         self.tab_imp = ImportDragonTab(self)
         self.tabs.addTab(self.tab_an, "1) Analyzer")
         self.tabs.addTab(self.tab_sc, "2) Scrubber")
         self.tabs.addTab(self.tab_ge, "3) Generate")
         self.tabs.addTab(self.tab_ecc, "4) Entity Classes")
-        self.tabs.addTab(self.tab_imp, "5) Import DRAGON")
+        self.tabs.addTab(self.tab_ucl, "5) Unit Classes")
+        self.tabs.addTab(self.tab_imp, "6) Import DRAGON")
         lay = QVBoxLayout(self)
         self.license_label = QLabel(self._license_summary())
         self.license_label.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -7536,6 +8556,7 @@ class MainWindow(QWidget):
         self.tab_sc.set_model(model)
         self.tab_ge.set_model(model)
         self.tab_ecc.set_model(model)
+        self.tab_ucl.set_model(model)
         self.tab_imp.set_model(model)
 
     def _license_summary(self) -> str:

@@ -1,0 +1,5 @@
+# Third-party dependencies for obs_license.py, dragon_importer_new.py, obs_scrubber_light.py
+PySide6
+pandas
+lxml
+openpyxl

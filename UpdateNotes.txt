@@ -30,13 +30,20 @@ COMPLETED: Added a “Duplicate unit subtree...” option in the Preview Model c
 
 COMPLETED: Added a Mass-rename dialog to the Preview Model (right-click a unit). You can edit prefix fields per unit, apply custom templates with tokens like {prefix1}, {suffix1}, {extra}, and optionally rename subordinate entity compositions with automatic numbering.
 
-TODO: Cleanup unwanted imports such as PyQt5, setuptools.
+COMPLETED: Cleanup unwanted imports such as PyQt5, setuptools.
 
-TODO: Explore conversion to PySide6 rather than PyQt6
+COMPLETED: Explore conversion to PySide6 rather than PyQt6
+
+COMPLETED: Explore the possibility of moving from pandas to polars for speed increases.
+
+COMPLETED: New tab next to Entity Classes called Unit Classes. Functions in the same way as Entity Classes but populates AggregateName, Federate and TypeName, MilStd2525CCode, UnitDisEnumeration.
+
 
 TODO: Explore LDIF import options.
 
 TODO: MULTI-THREADED? Speed up Processing and Preview Hierarchy Model on slower systems?
+
+
 
 
 
