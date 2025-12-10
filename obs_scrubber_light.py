@@ -8,6 +8,8 @@ from datetime import datetime
 
 from pathlib import Path
 
+from contextlib import contextmanager
+
 import pandas as pd, math
 
 from dataclasses import dataclass
@@ -40,6 +42,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QTreeWidget,
     QTreeWidgetItem,
+    QSplitter,
     QHeaderView,
     QTableWidget,
     QTableWidgetItem,
@@ -79,7 +82,7 @@ except Exception:
 
     LXML = False
 
-__version__ = "1.15"
+__version__ = "1.17"
 
 JTDS_NS = "https://jtds.jten.mil"
 
@@ -87,6 +90,59 @@ NS = {"j": JTDS_NS}
 
 LICENSE_INFO: Optional[LicensePayload] = None
 
+def _resource_search_paths() -> List[Path]:
+    bases: List[Path] = []
+    seen: Set[Path] = set()
+
+    def _add(path_like: Any, *, use_parent: bool = False) -> None:
+        if not path_like:
+            return
+        try:
+            candidate = Path(path_like)
+        except Exception:
+            return
+        try:
+            resolved = candidate.resolve(strict=False)
+        except Exception:
+            resolved = candidate
+        if use_parent:
+            resolved = resolved.parent
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        bases.append(resolved)
+
+    argv0 = sys.argv[0] if sys.argv else None
+    if argv0:
+        _add(argv0, use_parent=True)
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        _add(meipass)
+    _add(__file__, use_parent=True)
+    try:
+        _add(Path.cwd())
+    except Exception:
+        pass
+    if not bases:
+        bases.append(Path.cwd())
+    return bases
+
+
+def _locate_resource_path(*relative: str) -> Path:
+    bases = _resource_search_paths()
+    for base in bases:
+        candidate = base.joinpath(*relative)
+        if candidate.exists():
+            return candidate
+    if bases:
+        return bases[0].joinpath(*relative)
+    return Path(*relative)
+
+
+WARSIM_TYPENAME_MASTER = _locate_resource_path(
+    "UnitClass-Masters",
+    "WARSIM_UnitClass_TypeName-Master.csv",
+)
 
 
 _SIDC_SCHEME_NAMES = {
@@ -242,6 +298,7 @@ try:
         import_dragon_enhanced as cli_import_dragon_enhanced,
         normalize_to_jtds_schema as cli_normalize_to_jtds_schema,
         append_unitclasses_to_master as cli_append_unitclasses_to_master,
+        append_entityclasses_to_master as cli_append_entityclasses_to_master,
         DragonImportCancelled,
     )
 
@@ -250,6 +307,7 @@ except Exception:
     cli_import_dragon_enhanced = None
     cli_normalize_to_jtds_schema = None
     cli_append_unitclasses_to_master = None
+    cli_append_entityclasses_to_master = None
     class DragonImportCancelled(Exception):
         pass
 
@@ -356,31 +414,7 @@ def load_unitlist_map(xml_path: str) -> Dict[str, Dict[str, str]]:
 
 def _unitclass_master_search_bases() -> List[Path]:
 
-    candidates: List[Path] = []
-    seen: Set[Path] = set()
-
-    def _add(path_like: Any) -> None:
-        try:
-            base = Path(path_like)
-        except Exception:
-            return
-        if base in seen:
-            return
-        seen.add(base)
-        candidates.append(base)
-
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        _add(meipass)
-    try:
-        _add(Path(__file__).resolve().parent)
-    except Exception:
-        pass
-    try:
-        _add(Path.cwd())
-    except Exception:
-        pass
-    return candidates
+    return _resource_search_paths()
 
 
 def _default_unitclass_master_path() -> Optional[Path]:
@@ -5931,10 +5965,8 @@ class MilStd2525PickerDialog(QDialog):
         self.tree.setUniformRowHeights(True)
         self.tree.itemSelectionChanged.connect(self._handle_selection_changed)
         self.tree.itemDoubleClicked.connect(self._handle_item_double_clicked)
-        layout.addWidget(self.tree, 1)
 
         self.count_label = QLabel("")
-        layout.addWidget(self.count_label)
 
         component_box = QGroupBox("Code Components")
         comp_grid = QGridLayout(component_box)
@@ -5953,15 +5985,11 @@ class MilStd2525PickerDialog(QDialog):
         comp_grid.addWidget(self.country_component, 1, 3)
         comp_grid.addWidget(QLabel("Order of Battle"), 2, 0)
         comp_grid.addWidget(self.order_component, 2, 1)
-        layout.addWidget(component_box)
-
         self.detail_label = QLabel("Select an entry to preview the SIDC.")
         self.detail_label.setWordWrap(True)
-        layout.addWidget(self.detail_label)
 
         self.preview_toggle = QCheckBox("Show symbol preview")
         self.preview_toggle.setChecked(True)
-        layout.addWidget(self.preview_toggle)
 
         preview_box = QGroupBox("Symbol Preview")
         self.preview_box = preview_box
@@ -5979,7 +6007,34 @@ class MilStd2525PickerDialog(QDialog):
             self.preview_notice.setText(
                 "Symbol preview unavailable: install PySide6-QtWebEngine."
             )
-        layout.addWidget(preview_box)
+        function_panel = QWidget()
+        function_layout = QVBoxLayout(function_panel)
+        function_layout.setContentsMargins(0, 0, 0, 0)
+        function_layout.addWidget(self.tree, 1)
+        function_layout.addWidget(self.count_label)
+        function_layout.addWidget(component_box)
+        function_layout.addWidget(self.detail_label)
+        function_layout.addWidget(self.preview_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(function_panel)
+        splitter.addWidget(preview_box)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        splitter.setHandleWidth(10)
+        splitter.setStyleSheet(
+            """
+QSplitter::handle {
+    background-color: palette(midlight);
+    border: 1px solid palette(dark);
+}
+QSplitter::handle:vertical {
+    height: 10px;
+}
+"""
+        )
+        self._splitter = splitter
+        layout.addWidget(splitter, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self._ok_button = buttons.button(QDialogButtonBox.Ok)
@@ -6926,8 +6981,10 @@ class EntityClassesTab(QWidget):
             alias_list = ET.SubElement(ecc, jtag("AliasList"))
         alias = alias_element
         desired_federate = target_federate or federate
-        if target_federate:
-            alias = alias or self._find_alias_for_federate(ecc, target_federate)
+        if target_federate and alias is None:
+            candidate = self._find_alias_for_federate(ecc, target_federate)
+            if candidate is not None:
+                alias = candidate
         if alias is None:
             alias = jfind(alias_list, "j:Alias")
         if alias is None:
@@ -7085,6 +7142,11 @@ class UnitClassesTab(QWidget):
         self._new_row_seq = 0
         self._federate_label_all = "All Federates"
         self._refreshing_federate_combo = False
+        (
+            self._warsim_typename_choices,
+            self._warsim_typename_lookup,
+        ) = self._load_warsim_typename_options()
+        self._table_item_change_block = 0
         self._build()
 
     def _build(self):
@@ -7151,6 +7213,7 @@ class UnitClassesTab(QWidget):
         )
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.itemChanged.connect(self._on_table_item_changed)
         outer.addWidget(self.table)
         self.status_label = QLabel("No model loaded.")
         outer.addWidget(self.status_label)
@@ -7170,6 +7233,155 @@ class UnitClassesTab(QWidget):
             self.federate_combo,
         ]:
             widget.setEnabled(enabled)
+
+    @contextmanager
+    def _suspend_table_item_signals(self):
+        self._table_item_change_block += 1
+        try:
+            yield
+        finally:
+            self._table_item_change_block -= 1
+
+    def _on_table_item_changed(self, item: Optional[QTableWidgetItem]) -> None:
+        if not item or self._table_item_change_block > 0:
+            return
+        if item.column() == 1:
+            self._update_row_typename_editor(item.row())
+
+    def _load_warsim_typename_options(self) -> Tuple[List[str], Dict[str, str]]:
+        options: List[str] = []
+        lookup: Dict[str, str] = {}
+        path = WARSIM_TYPENAME_MASTER
+        try:
+            with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.reader(handle)
+                for row in reader:
+                    if not row:
+                        continue
+                    value = (row[0] or "").strip()
+                    if not value:
+                        continue
+                    lower = value.lower()
+                    if lower in lookup:
+                        continue
+                    options.append(value)
+                    lookup[lower] = value
+        except FileNotFoundError:
+            return [], {}
+        except Exception as exc:
+            print(f"Warning: Failed to load WARSIM TypeName master: {exc}")
+            return [], {}
+        return options, lookup
+
+    def _is_warsim_federate(self, federate: str) -> bool:
+        return federate.strip().upper() == "WARSIM"
+
+    def _canonical_warsim_typename(self, value: str) -> Optional[str]:
+        trimmed = value.strip()
+        if not trimmed:
+            return ""
+        return self._warsim_typename_lookup.get(trimmed.lower())
+
+    def _is_warsim_typename_widget(self, widget: Optional[QWidget]) -> bool:
+        return bool(
+            isinstance(widget, QComboBox) and widget.property("warsim_typename_combo")
+        )
+
+    def _create_warsim_combobox(self) -> QComboBox:
+        combo = QComboBox()
+        combo.addItem("")
+        combo.addItems(self._warsim_typename_choices)
+        combo.setProperty("warsim_typename_combo", True)
+        combo.currentTextChanged.connect(self._on_warsim_typename_changed)
+        return combo
+
+    def _set_combo_value(self, combo: QComboBox, value: str) -> None:
+        combo.blockSignals(True)
+        if not value:
+            combo.setCurrentIndex(0)
+        else:
+            idx = combo.findText(value, Qt.MatchFlag.MatchFixedString)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _update_row_typename_editor(self, row: int) -> None:
+        if (
+            row < 0
+            or row >= self.table.rowCount()
+            or not self._warsim_typename_choices
+        ):
+            return
+        federate = self._cell_text(row, 1)
+        widget = self.table.cellWidget(row, 2)
+        item = self.table.item(row, 2)
+        raw_item_text = (item.text() if item else "").strip()
+        current_value = (
+            self._cell_text(row, 2)
+            if self._is_warsim_typename_widget(widget)
+            else raw_item_text
+        )
+        if self._is_warsim_federate(federate):
+            if not self._is_warsim_typename_widget(widget):
+                combo = self._create_warsim_combobox()
+                with self._suspend_table_item_signals():
+                    self.table.setCellWidget(row, 2, combo)
+                widget = combo
+            combo_widget = widget if isinstance(widget, QComboBox) else None
+            if combo_widget is None:
+                return
+            canonical = self._canonical_warsim_typename(current_value)
+            if canonical is None:
+                canonical = ""
+            self._set_combo_value(combo_widget, canonical)
+            with self._suspend_table_item_signals():
+                target_item = self.table.item(row, 2)
+                if target_item is None:
+                    target_item = QTableWidgetItem(canonical)
+                    self.table.setItem(row, 2, target_item)
+                else:
+                    target_item.setText(canonical)
+        else:
+            if self._is_warsim_typename_widget(widget):
+                combo_widget = widget if isinstance(widget, QComboBox) else None
+                text_value = (
+                    combo_widget.currentText().strip()
+                    if combo_widget
+                    else current_value
+                )
+                with self._suspend_table_item_signals():
+                    self.table.removeCellWidget(row, 2)
+                    target_item = self.table.item(row, 2)
+                    if target_item is None:
+                        target_item = QTableWidgetItem(text_value)
+                        self.table.setItem(row, 2, target_item)
+                    else:
+                        target_item.setText(text_value)
+
+    def _cell_text(self, row: int, column: int) -> str:
+        widget = self.table.cellWidget(row, column)
+        if self._is_warsim_typename_widget(widget):
+            combo = widget if isinstance(widget, QComboBox) else None
+            if combo:
+                return combo.currentText().strip()
+        item = self.table.item(row, column)
+        return (item.text() if item else "").strip()
+
+    def _on_warsim_typename_changed(self, value: str) -> None:
+        combo = self.sender()
+        if not isinstance(combo, QComboBox) or not combo.property("warsim_typename_combo"):
+            return
+        view_pos = combo.mapTo(self.table.viewport(), combo.rect().center())
+        index = self.table.indexAt(view_pos)
+        row = index.row()
+        if row < 0:
+            return
+        with self._suspend_table_item_signals():
+            item = self.table.item(row, 2)
+            if item is None:
+                item = QTableWidgetItem(value)
+                self.table.setItem(row, 2, item)
+            else:
+                item.setText(value)
 
     def _current_federate_filter(self) -> Optional[str]:
         text = self.federate_combo.currentText().strip()
@@ -7347,20 +7559,24 @@ class UnitClassesTab(QWidget):
         row = self.table.rowCount()
         self.table.insertRow(row)
         key = self._next_row_key(element)
-        name_item = QTableWidgetItem(name)
-        name_item.setData(Qt.ItemDataRole.UserRole, key)
-        if not is_new:
-            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-        self.table.setItem(row, 0, name_item)
-        for col, value in enumerate([federate, typename, code2525, unit_enum], start=1):
-            item = QTableWidgetItem(value or "")
-            self.table.setItem(row, col, item)
+        with self._suspend_table_item_signals():
+            name_item = QTableWidgetItem(name)
+            name_item.setData(Qt.ItemDataRole.UserRole, key)
+            if not is_new:
+                name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(row, 0, name_item)
+            for col, value in enumerate(
+                [federate, typename, code2525, unit_enum], start=1
+            ):
+                item = QTableWidgetItem(value or "")
+                self.table.setItem(row, col, item)
         self._row_meta[key] = _UnitClassRowMeta(
             element=element,
             alias_element=alias_element,
             alias_federate=alias_federate,
             is_new=is_new,
         )
+        self._update_row_typename_editor(row)
 
     def _table_rows(self) -> List[Tuple[str, str, str, str, str]]:
         rows: List[Tuple[str, str, str, str, str]] = []
@@ -7368,14 +7584,13 @@ class UnitClassesTab(QWidget):
         for row in range(self.table.rowCount()):
             agg_item = self.table.item(row, 0)
             fed_item = self.table.item(row, 1)
-            type_item = self.table.item(row, 2)
             code_item = self.table.item(row, 3)
             enum_item = self.table.item(row, 4)
             agg = (agg_item.text() if agg_item else "").strip()
             federate = (fed_item.text() if fed_item else "").strip()
             if federate_filter:
                 federate = federate_filter
-            typename = (type_item.text() if type_item else "").strip()
+            typename = self._cell_text(row, 2)
             code2525 = (code_item.text() if code_item else "").strip()
             unit_enum = (enum_item.text() if enum_item else "").strip()
             rows.append((agg, federate, typename, code2525, unit_enum))
@@ -7394,12 +7609,25 @@ class UnitClassesTab(QWidget):
         return mapping
 
     def _set_cell_text(self, row: int, column: int, value: str) -> None:
-        item = self.table.item(row, column)
-        if item is None:
-            item = QTableWidgetItem(value)
-            self.table.setItem(row, column, item)
-        else:
-            item.setText(value)
+        refresh_editor = column == 1
+        with self._suspend_table_item_signals():
+            widget = self.table.cellWidget(row, column)
+            if column == 2 and self._is_warsim_typename_widget(widget):
+                combo = widget if isinstance(widget, QComboBox) else None
+                canonical = self._canonical_warsim_typename(value)
+                if canonical is None:
+                    canonical = ""
+                if combo is not None:
+                    self._set_combo_value(combo, canonical)
+                value = canonical
+            item = self.table.item(row, column)
+            if item is None:
+                item = QTableWidgetItem(value)
+                self.table.setItem(row, column, item)
+            else:
+                item.setText(value)
+        if refresh_editor:
+            self._update_row_typename_editor(row)
 
     def _extract_aggregate_name(self, ucl: ET._Element) -> str:
         agg = text(jfind(ucl, "j:AggregateName"))
@@ -7541,8 +7769,7 @@ class UnitClassesTab(QWidget):
                 return
             entry = dlg.selected_entry()
             self._set_cell_text(row, 3, code_value)
-            type_item = self.table.item(row, 2)
-            type_text = (type_item.text() if type_item else "").strip()
+            type_text = self._cell_text(row, 2)
             if not type_text and entry:
                 self._set_cell_text(row, 2, entry.title)
             self.status_label.setText(
@@ -7757,8 +7984,10 @@ class UnitClassesTab(QWidget):
             alias_list = ET.SubElement(ucl, jtag("AliasList"))
         alias = alias_element
         desired_federate = target_federate or federate
-        if target_federate:
-            alias = alias or self._find_alias_for_federate(ucl, target_federate)
+        if target_federate and alias is None:
+            candidate = self._find_alias_for_federate(ucl, target_federate)
+            if candidate is not None:
+                alias = candidate
         if alias is None:
             alias = jfind(alias_list, "j:Alias")
         if alias is None:
@@ -7819,6 +8048,7 @@ class UnitClassesTab(QWidget):
         created = 0
         updated = 0
         existing_name_keys = self._collect_existing_name_keys()
+        filter_value = self._current_federate_filter()
         for row in range(self.table.rowCount()):
             name_item = self.table.item(row, 0)
             if name_item is None:
@@ -7830,8 +8060,7 @@ class UnitClassesTab(QWidget):
             aggregate = (name_item.text() or "").strip()
             fed_item = self.table.item(row, 1)
             federate = (fed_item.text() if fed_item else "").strip()
-            type_item = self.table.item(row, 2)
-            typename = (type_item.text() if type_item else "").strip()
+            typename = self._cell_text(row, 2)
             code_item = self.table.item(row, 3)
             code2525 = (code_item.text() if code_item else "").strip()
             enum_item = self.table.item(row, 4)
@@ -8849,10 +9078,18 @@ class ImportDragonTab(QWidget):
         self.btn_build_classes = QPushButton("Build Classes")
         self.btn_build_classes.clicked.connect(self.on_build_classes)
         gl.addWidget(self.btn_build_classes, 2, 0, 1, 3)
+        self.btn_append_ecc = QPushButton(
+            "Append DRAGON Entity Classes to Master"
+        )
+        self.btn_append_ecc.clicked.connect(self.on_append_entityclasses)
+        self.btn_append_ecc.setEnabled(
+            cli_append_entityclasses_to_master is not None
+        )
+        gl.addWidget(self.btn_append_ecc, 3, 0, 1, 3)
         self.btn_append_ucl = QPushButton("Append DRAGON Unit Classes to Master")
         self.btn_append_ucl.clicked.connect(self.on_append_unitclasses)
         self.btn_append_ucl.setEnabled(cli_append_unitclasses_to_master is not None)
-        gl.addWidget(self.btn_append_ucl, 3, 0, 1, 3)
+        gl.addWidget(self.btn_append_ucl, 4, 0, 1, 3)
         outer.addWidget(grp)
         self.btn_import = QPushButton("Import into Current Model (or New)")
         self.btn_import.clicked.connect(self.on_import)
@@ -8877,6 +9114,10 @@ class ImportDragonTab(QWidget):
         self.ucl_edit.setEnabled(enable)
         self.btn_import.setEnabled(enable)
         self.btn_build_classes.setEnabled(enable)
+        if hasattr(self, "btn_append_ecc") and self.btn_append_ecc is not None:
+            self.btn_append_ecc.setEnabled(
+                enable and cli_append_entityclasses_to_master is not None
+            )
         if hasattr(self, "btn_append_ucl") and self.btn_append_ucl is not None:
             self.btn_append_ucl.setEnabled(
                 enable and cli_append_unitclasses_to_master is not None
@@ -8997,39 +9238,34 @@ class ImportDragonTab(QWidget):
         )
         return True
 
-    def _resolve_unitclass_master_path(self) -> Path:
-        raw = (self.ucl_edit.text() or "").strip()
+    def _resolve_master_path(self, raw_value: str, *, subfolder: str, filename: str) -> Path:
+        raw = (raw_value or "").strip()
         if raw:
             resolved = Path(raw).expanduser()
             if resolved.is_dir():
-                return resolved / "unitclass-master.xlsx"
+                return resolved / filename
             return resolved
-        candidates: list[Path] = []
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            try:
-                candidates.append(Path(meipass))
-            except Exception:
-                pass
-        try:
-            candidates.append(Path(__file__).resolve().parent)
-        except Exception:
-            pass
-        candidates.append(Path.cwd())
-        seen: set[Path] = set()
+        candidates = _resource_search_paths()
         for base in candidates:
-            if not isinstance(base, Path):
-                base = Path(base)
-            if base in seen:
-                continue
-            seen.add(base)
-            candidate = base / "UnitClass-Masters" / "unitclass-master.xlsx"
+            candidate = base / subfolder / filename
             if candidate.exists():
                 return candidate
         base = candidates[0] if candidates else Path.cwd()
-        if not isinstance(base, Path):
-            base = Path(base)
-        return base / "UnitClass-Masters" / "unitclass-master.xlsx"
+        return base / subfolder / filename
+
+    def _resolve_entityclass_master_path(self) -> Path:
+        return self._resolve_master_path(
+            self.ecc_edit.text(),
+            subfolder="EntityCompositionClass-Masters",
+            filename="entitycompositionclass-master.xlsx",
+        )
+
+    def _resolve_unitclass_master_path(self) -> Path:
+        return self._resolve_master_path(
+            self.ucl_edit.text(),
+            subfolder="UnitClass-Masters",
+            filename="unitclass-master.xlsx",
+        )
 
     def on_browse_dragon(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -9062,6 +9298,57 @@ class ImportDragonTab(QWidget):
         )
         if path:
             self.ucl_edit.setText(path)
+
+    def on_append_entityclasses(self) -> None:
+        if cli_append_entityclasses_to_master is None:
+            QMessageBox.warning(
+                self,
+                "Append EntityCompositionClass master",
+                "DRAGON helper is unavailable in this build.",
+            )
+            return
+        dragon_path = self.path_edit.text().strip()
+        if not dragon_path:
+            QMessageBox.information(
+                self,
+                "Append EntityCompositionClass master",
+                "Select a DRAGON workbook first.",
+            )
+            return
+        master_path = self._resolve_entityclass_master_path()
+        if not (self.ecc_edit.text() or "").strip():
+            self.ecc_edit.setText(str(master_path))
+        try:
+            added = cli_append_entityclasses_to_master(
+                dragon_path, str(master_path)
+            )
+        except FileNotFoundError as exc:
+            QMessageBox.warning(self, "Append EntityCompositionClass master", str(exc))
+            return
+        except ValueError as exc:
+            QMessageBox.warning(self, "Append EntityCompositionClass master", str(exc))
+            return
+        except Exception as exc:
+            traceback.print_exc()
+            QMessageBox.critical(
+                self,
+                "Append EntityCompositionClass master",
+                f"Failed to update EntityCompositionClass master: {exc}",
+            )
+            return
+        if added:
+            msg = (
+                f"Appended {added} new EntityCompositionClass row(s) to {master_path}"
+            )
+        else:
+            msg = (
+                "No new EntityCompositionClass rows were added; "
+                f"{master_path} already contains workbook classes."
+            )
+        self.log.append(msg)
+        QMessageBox.information(
+            self, "Append EntityCompositionClass master", msg
+        )
 
     def on_append_unitclasses(self) -> None:
         if cli_append_unitclasses_to_master is None:

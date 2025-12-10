@@ -725,8 +725,51 @@ def import_dragon_enhanced(
 
 
 
-def _default_unitclass_master_path() -> Path:
-    """Locate the default UnitClass master workbook bundled with the application."""
+_ECC_DIS_KEYS = ("kind", "domain", "country", "category", "subcategory", "specific", "extra")
+
+
+def _normalize_entity_dis_enumeration(value: str) -> str:
+    text = _norm(value)
+    if not text:
+        return ""
+    attrs: Dict[str, str] = {}
+    if "=" in text:
+        for part in re.split(r"[;,]\s*", text):
+            if "=" not in part:
+                continue
+            key, raw_val = part.split("=", 1)
+            digits = re.sub(r"[^0-9]", "", raw_val)
+            if not digits:
+                continue
+            try:
+                attrs[key.strip().lower()] = str(int(digits))
+            except ValueError:
+                attrs[key.strip().lower()] = digits
+    if attrs:
+        return ".".join(attrs.get(key, "0") or "0" for key in _ECC_DIS_KEYS)
+    tokens = re.split(r"[.\s/,-]+", text)
+    cleaned: list[str] = []
+    for token in tokens:
+        if not token.strip():
+            continue
+        digits = re.sub(r"[^0-9]", "", token)
+        if not digits:
+            continue
+        try:
+            cleaned.append(str(int(digits)))
+        except ValueError:
+            cleaned.append(digits)
+    if not cleaned:
+        return text
+    if len(cleaned) < len(_ECC_DIS_KEYS):
+        cleaned = cleaned + ["0"] * (len(_ECC_DIS_KEYS) - len(cleaned))
+    else:
+        cleaned = cleaned[: len(_ECC_DIS_KEYS)]
+    return ".".join(cleaned)
+
+
+def _default_master_path(subfolder: str, filename: str) -> Path:
+    """Locate a default master workbook bundled with the application."""
     candidates: list[Path] = []
     meipass = getattr(sys, '_MEIPASS', None)
     if meipass:
@@ -748,13 +791,23 @@ def _default_unitclass_master_path() -> Path:
         if base in examined:
             continue
         examined.add(base)
-        candidate = base / 'UnitClass-Masters' / 'unitclass-master.xlsx'
+        candidate = base / subfolder / filename
         if candidate.exists():
             return candidate
     base = candidates[0] if candidates else Path.cwd()
     if not isinstance(base, Path):
         base = Path(base)
-    return base / 'UnitClass-Masters' / 'unitclass-master.xlsx'
+    return base / subfolder / filename
+
+
+def _default_unitclass_master_path() -> Path:
+    return _default_master_path('UnitClass-Masters', 'unitclass-master.xlsx')
+
+
+def _default_entityclass_master_path() -> Path:
+    return _default_master_path(
+        'EntityCompositionClass-Masters', 'entitycompositionclass-master.xlsx'
+    )
 
 
 def append_unitclasses_to_master(dragon_xlsx_path: str, master_path: str | Path | None = None) -> int:
@@ -854,6 +907,141 @@ def append_unitclasses_to_master(dragon_xlsx_path: str, master_path: str | Path 
         master_df.to_excel(master_file, index=False)
     except Exception as exc:
         raise ValueError(f'Failed to write UnitClass master: {exc}') from exc
+
+    return len(added_rows)
+
+
+def append_entityclasses_to_master(
+    dragon_xlsx_path: str, master_path: str | Path | None = None
+) -> int:
+    """Append EntityCompositionClass rows to the master when missing."""
+    if not dragon_xlsx_path:
+        raise ValueError('DRAGON workbook path is required.')
+    dragon_file = Path(dragon_xlsx_path).expanduser()
+    if not dragon_file.exists():
+        raise FileNotFoundError(f'DRAGON workbook not found: {dragon_file}')
+    if master_path is None:
+        master_file = _default_entityclass_master_path()
+    else:
+        master_file = Path(master_path).expanduser()
+        if master_file.is_dir():
+            master_file = master_file / 'entitycompositionclass-master.xlsx'
+    if not master_file.exists():
+        raise FileNotFoundError(f'EntityCompositionClass master not found: {master_file}')
+
+    def _norm_key(platform: str, type_value: str) -> str:
+        plat = ' '.join(_norm(platform).upper().split()) if platform else ''
+        typ = (_norm(type_value) or 'EQUIPMENT').upper()
+        return f"{plat}||{typ}" if plat else ''
+
+    try:
+        xls = pd.ExcelFile(dragon_file)
+    except Exception as exc:
+        raise ValueError(f'Failed to open DRAGON workbook: {exc}') from exc
+
+    try:
+        master_df = pd.read_excel(master_file)
+    except FileNotFoundError:
+        master_df = pd.DataFrame(
+            columns=['PLATFORM', 'TYPE', 'DIS ENUMERATION', 'TYPE NAME']
+        )
+    except Exception as exc:
+        raise ValueError(f'Failed to read EntityCompositionClass master: {exc}') from exc
+
+    if not list(master_df.columns):
+        master_df = pd.DataFrame(
+            columns=['PLATFORM', 'TYPE', 'DIS ENUMERATION', 'TYPE NAME']
+        )
+    master_df = master_df.rename(
+        columns=lambda c: str(c).strip().upper() if isinstance(c, str) else c
+    )
+    for col in ('PLATFORM', 'TYPE', 'DIS ENUMERATION', 'TYPE NAME'):
+        if col not in master_df.columns:
+            master_df[col] = ''
+
+    master_df['PLATFORM'] = master_df['PLATFORM'].map(_norm)
+    master_df['TYPE'] = master_df['TYPE'].map(
+        lambda v: (_norm(v) or 'EQUIPMENT').upper()
+    )
+    master_df['DIS ENUMERATION'] = master_df['DIS ENUMERATION'].map(
+        _normalize_entity_dis_enumeration
+    )
+    master_df['TYPE NAME'] = master_df['TYPE NAME'].map(_norm)
+
+    preferred = ['PLATFORM', 'TYPE', 'DIS ENUMERATION', 'TYPE NAME']
+    ordered_cols = preferred + [c for c in master_df.columns if c not in preferred]
+    master_df = master_df[ordered_cols]
+
+    existing_keys: set[str] = set()
+    keep_rows: list[bool] = []
+    for _, row in master_df.iterrows():
+        key = _norm_key(row.get('PLATFORM', ''), row.get('TYPE', ''))
+        if not key or key in existing_keys:
+            keep_rows.append(False)
+        else:
+            keep_rows.append(True)
+            existing_keys.add(key)
+    master_df = master_df.loc[keep_rows].reset_index(drop=True)
+
+    template = {col: '' for col in master_df.columns}
+    added_rows: list[dict[str, str]] = []
+
+    for sheet_name in xls.sheet_names:
+        try:
+            df = xls.parse(sheet_name)
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        df.columns = [str(c).strip() for c in df.columns]
+        col_group = _pick_col(df.columns, 'TYPE GROUP', 'GROUP')
+        col_name = _pick_col(df.columns, 'NAME', 'ITEM NAME', 'ITEM')
+        col_platform = _pick_col(
+            df.columns,
+            'EQUIPMENT',
+            'ECC',
+            'COMPOSITION',
+            'ENTITY COMPOSITION',
+            'EQUIPMENT TYPE',
+            'PLATFORM',
+        )
+        col_den = _pick_col(
+            df.columns, 'DIS ENUMERATION', 'DIS_ENUMERATION', 'DIS ENUM', 'DIS'
+        )
+        col_tname = _pick_col(
+            df.columns, 'TYPE NAME', 'TYPE_NAME', 'TYPE-NAME', 'TYPENAME'
+        )
+        if not col_platform or not col_den:
+            continue
+        for _, row in df.iterrows():
+            platform = _norm(row.get(col_name)) if col_name else ''
+            if not platform:
+                platform = _norm(row.get(col_platform))
+            if not platform:
+                continue
+            dis_enum = _normalize_entity_dis_enumeration(row.get(col_den))
+            if not dis_enum:
+                continue
+            type_label_raw = _norm(row.get(col_group)) or 'EQUIPMENT'
+            type_label = type_label_raw.upper()
+            key = _norm_key(platform, type_label)
+            if not key or key in existing_keys:
+                continue
+            existing_keys.add(key)
+            row_dict = template.copy()
+            row_dict['PLATFORM'] = platform
+            row_dict['TYPE'] = type_label_raw
+            row_dict['DIS ENUMERATION'] = dis_enum
+            row_dict['TYPE NAME'] = ''
+            added_rows.append(row_dict)
+
+    if added_rows:
+        master_df = pd.concat([master_df, pd.DataFrame(added_rows)], ignore_index=True)
+
+    try:
+        master_df.to_excel(master_file, index=False)
+    except Exception as exc:
+        raise ValueError(f'Failed to write EntityCompositionClass master: {exc}') from exc
 
     return len(added_rows)
 
@@ -993,4 +1181,3 @@ def normalize_to_jtds_schema(model) -> None:
     for ec in entlist.findall(j('EntityComposition')):
         if not (ec.get('id')):
             ec.set('id', new_entity_id())
-
