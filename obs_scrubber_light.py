@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sys, traceback, zipfile, random, string, time, copy, csv, re
+import sys, traceback, zipfile, random, string, time, copy, csv, re, os, json
 
 from datetime import datetime
 
@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Iterable, Callable, Ma
 
 from collections import defaultdict
 
-from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QUrl
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -51,6 +51,11 @@ from PySide6.QtWidgets import (
     QProgressBar,
 )
 
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+except Exception:
+    QWebEngineView = None
+
 from obs_license import (
     DEFAULT_LICENSE_FILENAME,
     LicenseError,
@@ -74,7 +79,7 @@ except Exception:
 
     LXML = False
 
-__version__ = "1.12"
+__version__ = "1.15"
 
 JTDS_NS = "https://jtds.jten.mil"
 
@@ -82,6 +87,153 @@ NS = {"j": JTDS_NS}
 
 LICENSE_INFO: Optional[LicensePayload] = None
 
+
+
+_SIDC_SCHEME_NAMES = {
+    "S": "Warfighting",
+    "I": "Intelligence",
+    "O": "Stability Operations",
+    "E": "Emergency Management",
+    "G": "Meteorological",
+    "W": "Space",
+    "X": "Other",
+}
+
+_SIDC_AFFILIATION_NAMES = {
+    "P": "Pending",
+    "U": "Unknown",
+    "A": "Assumed Friendly",
+    "F": "Friendly",
+    "N": "Neutral",
+    "H": "Hostile",
+    "S": "Suspect",
+    "J": "Joker",
+    "K": "Faker",
+    "L": "Exercise Friendly",
+    "M": "Exercise Neutral",
+    "D": "Exercise Hostile",
+    "G": "Exercise Pending",
+    "O": "Exercise Unknown",
+}
+
+_SIDC_DIMENSION_NAMES = {
+    "P": "Space",
+    "A": "Air",
+    "F": "SOF",
+    "G": "Ground",
+    "S": "Sea Surface",
+    "U": "Sea Subsurface",
+    "Z": "Other",
+}
+
+_SIDC_STATUS_NAMES = {
+    "P": "Present / Known",
+    "A": "Anticipated / Planned",
+    "C": "Present / Fully Capable",
+    "D": "Present / Damaged",
+    "X": "Present / Destroyed",
+    "F": "Present / Full",
+    "U": "Present / Unknown",
+}
+
+
+_MILSYMBOL_PREVIEW_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>MIL-STD-2525C Preview</title>
+<style>
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #f5f5f5;
+    color: #222222;
+}
+#symbol-host {
+    min-height: 135px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
+}
+.message {
+    text-align: center;
+    opacity: 0.7;
+}
+svg {
+    max-width: 100%;
+    height: auto;
+}
+</style>
+<script src="milsymbol.js"></script>
+<script>
+(function () {
+    const hostId = "symbol-host";
+    function setMessage(msg) {
+        const host = document.getElementById(hostId);
+        if (!host) {
+            return;
+        }
+        host.innerHTML = "<div class='message'>" + msg + "</div>";
+    }
+    function getLibrary() {
+        if (window.ms && typeof window.ms.Symbol === "function") {
+            return window.ms;
+        }
+        if (window.milsymbol && typeof window.milsymbol.Symbol === "function") {
+            return window.milsymbol;
+        }
+        return null;
+    }
+    window.renderSymbol = function (sidc) {
+        const host = document.getElementById(hostId);
+        if (!host) {
+            return;
+        }
+        if (!sidc) {
+            setMessage("Select an entry to preview the SIDC.");
+            return;
+        }
+        const lib = getLibrary();
+        if (!lib) {
+            setMessage("milsymbol.js failed to load.");
+            return;
+        }
+        try {
+            const symbol = new lib.Symbol(sidc, { size: 180 });
+            const svg = symbol.asSVG();
+            host.innerHTML = "";
+            if (typeof svg === "string") {
+                host.innerHTML = svg;
+            } else if (svg) {
+                host.appendChild(svg);
+            } else {
+                setMessage("Rendered symbol had no output.");
+            }
+        } catch (err) {
+            setMessage("Failed to render symbol: " + err);
+        }
+    };
+    window.renderSymbol("");
+})();
+</script>
+</head>
+<body>
+<div id="symbol-host"></div>
+</body>
+</html>
+"""
+
+
+@dataclass(frozen=True)
+class _SidcAttributeLookup:
+
+    affiliations: List[Tuple[str, str]]
+    statuses: List[Tuple[str, str]]
+    sizes: List[Tuple[str, str]]
+    countries: List[Tuple[str, str]]
+    orders_of_battle: List[Tuple[str, str]]
 
 
 try:
@@ -200,6 +352,62 @@ def load_unitlist_map(xml_path: str) -> Dict[str, Dict[str, str]]:
             if code:
                 mapping[code] = {k: v for k, v in ude_el.attrib.items()}
     return mapping
+
+
+def _unitclass_master_search_bases() -> List[Path]:
+
+    candidates: List[Path] = []
+    seen: Set[Path] = set()
+
+    def _add(path_like: Any) -> None:
+        try:
+            base = Path(path_like)
+        except Exception:
+            return
+        if base in seen:
+            return
+        seen.add(base)
+        candidates.append(base)
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        _add(meipass)
+    try:
+        _add(Path(__file__).resolve().parent)
+    except Exception:
+        pass
+    try:
+        _add(Path.cwd())
+    except Exception:
+        pass
+    return candidates
+
+
+def _default_unitclass_master_path() -> Optional[Path]:
+
+    for base in _unitclass_master_search_bases():
+        candidate = base / "UnitClass-Masters" / "unitclass-master.xlsx"
+        if candidate.exists():
+            return candidate
+    bases = _unitclass_master_search_bases()
+    if bases:
+        return bases[0] / "UnitClass-Masters" / "unitclass-master.xlsx"
+    return None
+
+
+def _resolve_symbols_path(filename: str) -> Optional[Path]:
+
+    for base in _unitclass_master_search_bases():
+        candidate = base / "Symbols" / filename
+        if candidate.exists():
+            return candidate
+    try:
+        fallback = Path("Symbols") / filename
+    except Exception:
+        return None
+    if fallback.exists():
+        return fallback
+    return None
 
 
 def _is_valid_unit_xml_id(val: Optional[str]) -> bool:
@@ -5536,6 +5744,554 @@ class _UnitClassRowMeta:
     is_new: bool
 
 
+@dataclass(frozen=True)
+class MilStd2525Entry:
+
+    identifier: str
+    scheme: str
+    battle_dimension: str
+    function_id: str
+    modifier1: str
+    modifier2: str
+    size_fragment: str
+    country_fragment: str
+    order_fragment: str
+    title: str
+    description: str
+    search_text: str
+
+    def function_block(self) -> str:
+        return f"{self.function_id}{self.modifier1}{self.modifier2}"
+
+
+_MILSTD2525_CACHE: Optional[List[MilStd2525Entry]] = None
+_SIDC_LOOKUP_CACHE: Optional[_SidcAttributeLookup] = None
+
+
+def _clean_sidc_fragment(value: Any, length: int, default: str = "-") -> str:
+
+    text = ""
+    if isinstance(value, str):
+        text = value.strip()
+    if not text or text == "nan":
+        text = ""
+    text = text.replace("*", "-").upper()
+    cleaned = "".join(ch if ch.isalnum() or ch == "-" else "-" for ch in text)
+    if not cleaned:
+        cleaned = default * length
+    if len(cleaned) < length:
+        cleaned += "-" * (length - len(cleaned))
+    return cleaned[:length]
+
+
+def _load_sidc_attribute_lookup() -> _SidcAttributeLookup:
+
+    global _SIDC_LOOKUP_CACHE
+    if _SIDC_LOOKUP_CACHE is not None:
+        return _SIDC_LOOKUP_CACHE
+    csv_path = _resolve_symbols_path("2525c-tablei_ii.csv")
+    if not csv_path:
+        raise FileNotFoundError(
+            "Could not locate Symbols/2525c-tablei_ii.csv needed for MIL-STD-2525C lookup."
+        )
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as exc:
+        raise ValueError(f"Failed to load {csv_path}: {exc}") from exc
+
+    def collect(label: str, modifier: str) -> List[Tuple[str, str]]:
+        options: List[Tuple[str, str]] = []
+        if label not in df.columns or modifier not in df.columns:
+            return options
+        for _, row in df.iterrows():
+            raw_name = row.get(label)
+            raw_code = row.get(modifier)
+            if pd.isna(raw_name) or pd.isna(raw_code):
+                continue
+            name = str(raw_name).strip()
+            code = str(raw_code).strip().upper()
+            if name and code:
+                options.append((name, code))
+        return options
+
+    lookup = _SidcAttributeLookup(
+        affiliations=collect("Affiliation", "Affiliation Modifier"),
+        statuses=collect("Status", "Status Modifier"),
+        sizes=collect("Size", "Size Modifier"),
+        countries=collect("Country", "Country Modifier"),
+        orders_of_battle=collect("OrderOfBattle", "OrderOfBattle Modifier"),
+    )
+    _SIDC_LOOKUP_CACHE = lookup
+    return lookup
+
+
+def _load_milstd2525_library() -> List[MilStd2525Entry]:
+
+    global _MILSTD2525_CACHE
+    if _MILSTD2525_CACHE is not None:
+        return _MILSTD2525_CACHE
+    csv_path = _resolve_symbols_path("2525c-tableiii.csv")
+    if not csv_path:
+        raise FileNotFoundError(
+            "Could not locate Symbols/2525c-tableiii.csv needed for MIL-STD-2525C lookup."
+        )
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as exc:
+        raise ValueError(f"Failed to load {csv_path}: {exc}") from exc
+    entries: List[MilStd2525Entry] = []
+    for _, row in df.iterrows():
+        identifier = str(row.get("Unnamed: 0") or "").strip()
+        if not identifier:
+            continue
+        scheme = _clean_sidc_fragment(row.get("Scheme"), 1, "S")
+        battle_dimension = _clean_sidc_fragment(row.get("BattleDimension"), 1, "G")
+        function_id = _clean_sidc_fragment(row.get("FunctionID"), 2, "-")
+        modifier1 = _clean_sidc_fragment(row.get("Modifier1"), 2, "-")
+        modifier2 = _clean_sidc_fragment(row.get("Modifier2"), 2, "-")
+        size_fragment = _clean_sidc_fragment(row.get("Size"), 2, "-")
+        country_fragment = _clean_sidc_fragment(row.get("Country"), 2, "-")
+        order_fragment = _clean_sidc_fragment(row.get("OrderOfBattle"), 1, "-")
+        text_bits = [
+            str(val).strip()
+            for val in row.values.tolist()[11:]
+            if isinstance(val, str) and val.strip()
+        ]
+        description = " ".join(text_bits)
+        title = description or identifier.split(".")[-1]
+        search_text = " ".join([identifier, description]).upper()
+        entries.append(
+            MilStd2525Entry(
+                identifier=identifier,
+                scheme=scheme,
+                battle_dimension=battle_dimension,
+                function_id=function_id,
+                modifier1=modifier1,
+                modifier2=modifier2,
+                size_fragment=size_fragment,
+                country_fragment=country_fragment,
+                order_fragment=order_fragment,
+                title=title.strip(),
+                description=description.strip(),
+                search_text=search_text,
+            )
+        )
+    _MILSTD2525_CACHE = entries
+    return entries
+
+
+class MilStd2525PickerDialog(QDialog):
+
+    def __init__(
+        self,
+        parent: Optional[QWidget],
+        entries: List[MilStd2525Entry],
+        lookup: _SidcAttributeLookup,
+        *,
+        initial_code: Optional[str] = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Select MIL-STD-2525C Code")
+        self.resize(800, 600)
+        self._entries = entries
+        self._lookup = lookup
+        self._entry_by_identifier: Dict[str, MilStd2525Entry] = {
+            e.identifier: e for e in entries
+        }
+        self._entry_by_function: Dict[str, MilStd2525Entry] = {}
+        for entry in entries:
+            self._entry_by_function.setdefault(entry.function_block(), entry)
+        self._selected_entry: Optional[MilStd2525Entry] = None
+        self._selected_code: Optional[str] = None
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Filter the MIL-STD-2525C hierarchy, choose a row, then adjust "
+            "affiliation/status/echelon/country/order to build the 15-character SIDC."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Scheme"))
+        self.scheme_filter = QComboBox()
+        filter_row.addWidget(self.scheme_filter)
+        filter_row.addWidget(QLabel("Battle Dimension"))
+        self.dimension_filter = QComboBox()
+        filter_row.addWidget(self.dimension_filter)
+        filter_row.addWidget(QLabel("Search"))
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Type to search identifiers or descriptions")
+        filter_row.addWidget(self.search_edit, 1)
+        layout.addLayout(filter_row)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(2)
+        self.tree.setHeaderLabels(["Hierarchy", "Description"])
+        self.tree.setUniformRowHeights(True)
+        self.tree.itemSelectionChanged.connect(self._handle_selection_changed)
+        self.tree.itemDoubleClicked.connect(self._handle_item_double_clicked)
+        layout.addWidget(self.tree, 1)
+
+        self.count_label = QLabel("")
+        layout.addWidget(self.count_label)
+
+        component_box = QGroupBox("Code Components")
+        comp_grid = QGridLayout(component_box)
+        self.affiliation_component = QComboBox()
+        self.status_component = QComboBox()
+        self.size_component = QComboBox()
+        self.country_component = QComboBox()
+        self.order_component = QComboBox()
+        comp_grid.addWidget(QLabel("Affiliation"), 0, 0)
+        comp_grid.addWidget(self.affiliation_component, 0, 1)
+        comp_grid.addWidget(QLabel("Status"), 0, 2)
+        comp_grid.addWidget(self.status_component, 0, 3)
+        comp_grid.addWidget(QLabel("Echelon / HQ / Task"), 1, 0)
+        comp_grid.addWidget(self.size_component, 1, 1)
+        comp_grid.addWidget(QLabel("Country"), 1, 2)
+        comp_grid.addWidget(self.country_component, 1, 3)
+        comp_grid.addWidget(QLabel("Order of Battle"), 2, 0)
+        comp_grid.addWidget(self.order_component, 2, 1)
+        layout.addWidget(component_box)
+
+        self.detail_label = QLabel("Select an entry to preview the SIDC.")
+        self.detail_label.setWordWrap(True)
+        layout.addWidget(self.detail_label)
+
+        self.preview_toggle = QCheckBox("Show symbol preview")
+        self.preview_toggle.setChecked(True)
+        layout.addWidget(self.preview_toggle)
+
+        preview_box = QGroupBox("Symbol Preview")
+        self.preview_box = preview_box
+        preview_layout = QVBoxLayout(preview_box)
+        self.preview_notice = QLabel("")
+        self.preview_notice.setWordWrap(True)
+        preview_layout.addWidget(self.preview_notice)
+        if QWebEngineView is not None:
+            self.preview_view = QWebEngineView()
+            self.preview_view.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+            self.preview_view.setMinimumHeight(125)
+            preview_layout.addWidget(self.preview_view, 1)
+        else:
+            self.preview_view = None
+            self.preview_notice.setText(
+                "Symbol preview unavailable: install PySide6-QtWebEngine."
+            )
+        layout.addWidget(preview_box)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self._ok_button = buttons.button(QDialogButtonBox.Ok)
+        self._ok_button.setEnabled(False)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.preview_toggle.toggled.connect(self._handle_preview_toggle)
+        self.preview_box.setVisible(self.preview_toggle.isChecked())
+
+        self._preview_enabled = False
+        self._preview_ready = False
+        self._preview_display_active = False
+        self._current_preview_code: str = ""
+
+        self._populate_filter_combos()
+        self._populate_component_combos()
+        self.scheme_filter.currentIndexChanged.connect(self._refilter_entries)
+        self.dimension_filter.currentIndexChanged.connect(self._refilter_entries)
+        self.search_edit.textChanged.connect(self._refilter_entries)
+        for combo in [
+            self.affiliation_component,
+            self.status_component,
+            self.size_component,
+            self.country_component,
+            self.order_component,
+        ]:
+            combo.currentIndexChanged.connect(self._update_preview)
+        self._setup_symbol_preview()
+        self._handle_preview_toggle(self.preview_toggle.isChecked())
+        self._refilter_entries()
+        if initial_code:
+            self._apply_initial_code(initial_code)
+
+    def selected_entry(self) -> Optional[MilStd2525Entry]:
+        return self._selected_entry
+
+    def selected_code(self) -> Optional[str]:
+        return self._selected_code
+
+    def _populate_filter_combos(self) -> None:
+        def fill(combo: QComboBox, values: Iterable[str], mapping: Mapping[str, str]) -> None:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("Any", None)
+            for value in sorted({v for v in values if v}):
+                label = mapping.get(value.upper(), "Unknown")
+                combo.addItem(f"{value} - {label}", value)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+
+        fill(self.scheme_filter, (e.scheme for e in self._entries), _SIDC_SCHEME_NAMES)
+        fill(
+            self.dimension_filter,
+            (e.battle_dimension for e in self._entries),
+            _SIDC_DIMENSION_NAMES,
+        )
+
+    def _populate_component_combos(self) -> None:
+        def fill(combo: QComboBox, pairs: List[Tuple[str, str]], *, default: str, label: str) -> None:
+            combo.blockSignals(True)
+            combo.clear()
+            default_display = f"{label} ({default})" if default not in ("--", "-") else f"{label}"
+            combo.addItem(default_display, default)
+            seen: Set[str] = set()
+            for name, code in pairs:
+                if code in seen:
+                    continue
+                seen.add(code)
+                combo.addItem(f"{name} ({code})", code)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+
+        fill(
+            self.affiliation_component,
+            self._lookup.affiliations,
+            default="F",
+            label="Friendly",
+        )
+        fill(
+            self.status_component,
+            self._lookup.statuses,
+            default="P",
+            label="Present/Known",
+        )
+        fill(
+            self.size_component,
+            self._lookup.sizes,
+            default="--",
+            label="Unspecified (--)",
+        )
+        fill(
+            self.country_component,
+            self._lookup.countries,
+            default="--",
+            label="No Country (--)",
+        )
+        fill(
+            self.order_component,
+            self._lookup.orders_of_battle,
+            default="-",
+            label="No O/B (-)",
+        )
+
+    def _setup_symbol_preview(self) -> None:
+        self._preview_enabled = False
+        self._preview_ready = False
+        if self.preview_view is None:
+            if not self.preview_notice.text().strip():
+                self.preview_notice.setText(
+                    "Symbol preview unavailable: install PySide6-QtWebEngine."
+                )
+            self.preview_toggle.setChecked(False)
+            self.preview_toggle.setEnabled(False)
+            self.preview_box.setVisible(False)
+            return
+        js_path = _resolve_symbols_path("milsymbol.js")
+        if not js_path:
+            self.preview_notice.setText(
+                "Symbol preview unavailable: Symbols/milsymbol.js not found."
+            )
+            self.preview_toggle.setChecked(False)
+            self.preview_toggle.setEnabled(False)
+            self.preview_box.setVisible(False)
+            return
+        self._preview_enabled = True
+        self.preview_notice.setText("Symbol preview powered by Symbols/milsymbol.js.")
+        base_dir = js_path.parent.resolve()
+        base_url = QUrl.fromLocalFile(str(base_dir) + os.sep)
+        self.preview_view.loadFinished.connect(self._handle_preview_load_finished)
+        self.preview_view.setHtml(_MILSYMBOL_PREVIEW_HTML, base_url)
+
+    def _handle_preview_toggle(self, checked: bool) -> None:
+        active = bool(checked and self._preview_enabled)
+        self._preview_display_active = active
+        self.preview_box.setVisible(active)
+        if active:
+            self._maybe_update_symbol_preview()
+
+    def _handle_preview_load_finished(self, ok: bool) -> None:
+        self._preview_ready = bool(ok)
+        if not ok:
+            self.preview_notice.setText("Failed to load symbol preview page.")
+            return
+        self._maybe_update_symbol_preview()
+
+    def _set_preview_code(self, code: Optional[str]) -> None:
+        self._current_preview_code = (code or "").strip()
+        self._maybe_update_symbol_preview()
+
+    def _maybe_update_symbol_preview(self) -> None:
+        if (
+            not self._preview_enabled
+            or self.preview_view is None
+            or not self._preview_display_active
+            or not self._preview_ready
+        ):
+            return
+        payload = json.dumps(self._current_preview_code)
+        self.preview_view.page().runJavaScript(f"window.renderSymbol({payload});")
+
+    def _combo_value(self, combo: QComboBox) -> Optional[str]:
+        value = combo.currentData()
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    def _refilter_entries(self) -> None:
+        scheme = self._combo_value(self.scheme_filter)
+        dimension = self._combo_value(self.dimension_filter)
+        query = self.search_edit.text().strip().upper()
+        matches: List[MilStd2525Entry] = []
+        for entry in self._entries:
+            if scheme and entry.scheme != scheme:
+                continue
+            if dimension and entry.battle_dimension != dimension:
+                continue
+            if query and query not in entry.search_text:
+                continue
+            matches.append(entry)
+        self._populate_tree(matches)
+
+    def _populate_tree(self, entries: List[MilStd2525Entry]) -> None:
+        self.tree.setSortingEnabled(False)
+        self.tree.clear()
+        for entry in entries:
+            description = entry.description or entry.title
+            item = QTreeWidgetItem([entry.identifier, description])
+            item.setData(0, Qt.ItemDataRole.UserRole, entry.identifier)
+            self.tree.addTopLevelItem(item)
+        self.tree.sortItems(0, Qt.SortOrder.AscendingOrder)
+        self.tree.setSortingEnabled(True)
+        self.count_label.setText(f"{len(entries)} matching symbol(s).")
+        if entries:
+            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+        else:
+            self._selected_entry = None
+            self._selected_code = None
+            self._ok_button.setEnabled(False)
+            self.detail_label.setText("No matches. Adjust the filters to continue.")
+            self._set_preview_code(None)
+
+    def _handle_selection_changed(self) -> None:
+        item = self.tree.currentItem()
+        if not item:
+            self._selected_entry = None
+            self._selected_code = None
+            self._ok_button.setEnabled(False)
+            self.detail_label.setText("Select an entry to preview the SIDC.")
+            self._set_preview_code(None)
+            return
+        identifier = item.data(0, Qt.ItemDataRole.UserRole)
+        entry = self._entry_by_identifier.get(identifier)
+        self._selected_entry = entry
+        if entry:
+            self._apply_entry_defaults(entry)
+        self._update_preview()
+
+    def _apply_entry_defaults(self, entry: MilStd2525Entry) -> None:
+        if entry.size_fragment and entry.size_fragment != "--":
+            self._set_combo_to_value(self.size_component, entry.size_fragment)
+        if entry.country_fragment and entry.country_fragment != "--":
+            self._set_combo_to_value(self.country_component, entry.country_fragment)
+        if entry.order_fragment and entry.order_fragment != "-":
+            self._set_combo_to_value(self.order_component, entry.order_fragment)
+
+    def _handle_item_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        if item is not None:
+            self.accept()
+
+    def _apply_initial_code(self, code: str) -> None:
+        cleaned = "".join(ch for ch in str(code).strip().upper() if not ch.isspace())
+        if len(cleaned) != 15:
+            return
+        function_block = cleaned[4:10]
+        entry = self._entry_by_function.get(function_block)
+        if entry:
+            self._set_combo_to_value(self.scheme_filter, entry.scheme)
+            self._set_combo_to_value(self.dimension_filter, entry.battle_dimension)
+            self._refilter_entries()
+            for idx in range(self.tree.topLevelItemCount()):
+                item = self.tree.topLevelItem(idx)
+                if item.data(0, Qt.ItemDataRole.UserRole) == entry.identifier:
+                    self.tree.setCurrentItem(item)
+                    self.tree.scrollToItem(item)
+                    break
+        self._set_combo_to_value(self.affiliation_component, cleaned[1])
+        self._set_combo_to_value(self.status_component, cleaned[3])
+        self._set_combo_to_value(self.size_component, cleaned[10:12])
+        self._set_combo_to_value(self.country_component, cleaned[12:14])
+        self._set_combo_to_value(self.order_component, cleaned[14])
+
+    def _set_combo_to_value(self, combo: QComboBox, value: str) -> None:
+        if value is None:
+            combo.setCurrentIndex(0)
+            return
+        idx = combo.findData(value)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _component_fragment(self, combo: QComboBox, *, length: int, default: str) -> str:
+        value = combo.currentData()
+        if isinstance(value, str) and value:
+            return _clean_sidc_fragment(value, length, default)
+        return default * length
+
+    def _compose_sidc(self) -> Optional[str]:
+        entry = self._selected_entry
+        if not entry:
+            return None
+        scheme = _clean_sidc_fragment(entry.scheme, 1, "S")
+        dimension = _clean_sidc_fragment(entry.battle_dimension, 1, "G")
+        affiliation = self._component_fragment(self.affiliation_component, length=1, default="F")
+        status = self._component_fragment(self.status_component, length=1, default="P")
+        size_fragment = self._component_fragment(self.size_component, length=2, default="-")
+        country_fragment = self._component_fragment(self.country_component, length=2, default="-")
+        order_fragment = self._component_fragment(self.order_component, length=1, default="-")
+        code = (
+            scheme
+            + affiliation
+            + dimension
+            + status
+            + entry.function_block()
+            + size_fragment
+            + country_fragment
+            + order_fragment
+        )
+        return code
+
+    def _update_preview(self) -> None:
+        entry = self._selected_entry
+        if not entry:
+            self._selected_code = None
+            self._ok_button.setEnabled(False)
+            self.detail_label.setText("Select an entry to preview the SIDC.")
+            self._set_preview_code(None)
+            return
+        code = self._compose_sidc()
+        if not code:
+            self._selected_code = None
+            self._ok_button.setEnabled(False)
+            self.detail_label.setText("Unable to compose a SIDC for the selected entry.")
+            self._set_preview_code(None)
+            return
+        self._selected_code = code
+        self._ok_button.setEnabled(True)
+        descriptor = entry.description or entry.title
+        self.detail_label.setText(f"{code}\n{entry.title}\n{descriptor}")
+        self._set_preview_code(code)
+
+
 class EntityClassesTab(QWidget):
 
     def __init__(self, parent):
@@ -6354,6 +7110,8 @@ class UnitClassesTab(QWidget):
         self.btn_refresh.clicked.connect(self._reload_table)
         self.btn_add = QPushButton("Add Row")
         self.btn_add.clicked.connect(self._on_add_row)
+        self.btn_pick_code = QPushButton("Pick 2525C...")
+        self.btn_pick_code.clicked.connect(self._on_pick_2525_code)
         self.btn_save = QPushButton("Save Changes")
         self.btn_save.clicked.connect(self._on_save)
         self.btn_import = QPushButton("Import CSV...")
@@ -6366,6 +7124,7 @@ class UnitClassesTab(QWidget):
         self.btn_sort.clicked.connect(self._on_sort)
         controls.addWidget(self.btn_refresh)
         controls.addWidget(self.btn_add)
+        controls.addWidget(self.btn_pick_code)
         controls.addWidget(self.btn_save)
         controls.addWidget(self.btn_import)
         controls.addWidget(self.btn_export)
@@ -6401,6 +7160,7 @@ class UnitClassesTab(QWidget):
         for widget in [
             self.btn_refresh,
             self.btn_add,
+            self.btn_pick_code,
             self.btn_save,
             self.btn_import,
             self.btn_export,
@@ -6744,6 +7504,50 @@ class UnitClassesTab(QWidget):
         self.status_label.setText(
             f"{self.table.rowCount()} row(s) in table. New rows require an AggregateName before saving."
         )
+
+    def _on_pick_2525_code(self) -> None:
+        if not self.model:
+            QMessageBox.information(
+                self, "Pick 2525C", "Load or create a JTDS OBS model first."
+            )
+            return
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(
+                self, "Pick 2525C", "Select a row before choosing a code."
+            )
+            return
+        try:
+            entries = _load_milstd2525_library()
+            lookup = _load_sidc_attribute_lookup()
+        except (FileNotFoundError, ValueError) as exc:
+            QMessageBox.warning(self, "Pick 2525C", str(exc))
+            return
+        if not entries:
+            QMessageBox.warning(
+                self,
+                "Pick 2525C",
+                "No MIL-STD-2525C entries were available in the Symbols tables.",
+            )
+            return
+        code_item = self.table.item(row, 3)
+        current_code = (code_item.text() if code_item else "").strip()
+        dlg = MilStd2525PickerDialog(
+            self, entries, lookup, initial_code=current_code or None
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            code_value = dlg.selected_code()
+            if not code_value:
+                return
+            entry = dlg.selected_entry()
+            self._set_cell_text(row, 3, code_value)
+            type_item = self.table.item(row, 2)
+            type_text = (type_item.text() if type_item else "").strip()
+            if not type_text and entry:
+                self._set_cell_text(row, 2, entry.title)
+            self.status_label.setText(
+                f"Row {row + 1}: Applied MIL-STD-2525C code {code_value}."
+            )
 
     def _on_sort(self) -> None:
         column = 0 if self.sort_combo.currentIndex() == 0 else 3

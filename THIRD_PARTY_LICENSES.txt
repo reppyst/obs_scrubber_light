@@ -1,0 +1,238 @@
+  OBS Scrubber Light – Third-Party Notices
+  Updated: 9 December 2025
+
+  This document lists the third-party software that ships inside the OBS Scrubber Light packaged build and summarizes
+  the obligations tied to each license. Ship this file together with LICENSE.txt and the binary distribution. Always
+  update the versions and paths below if you upgrade dependencies.
+
+  Summary of bundled components
+  ---------------------------------------------------------------------------
+  Component            Version    License                        Notes / Source
+  ---------------------------------------------------------------------------
+  CPython runtime      3.13.x     Python Software Foundation v2  Additional Licenses/Python3.13_LICENSE.txt.
+  PyInstaller          6.13.0     GPL-2.0-or-later + exception   Additional Licenses/PyInstaller6.13.0_COPYING.txt.
+  PyQt6                6.9.1      GPL-3.0-only                   Additional Licenses/PyQt6-6.9.1_LICENSE.
+  PyQt6-Qt6            6.9.2      LGPL-3.0-only                  Additional Licenses/PyQt6_qt6-6.9.2_LICENSE.
+  PySide6-QtWebEngine  6.9.2      LGPL-3.0-only + Qt notices     Additional Licenses/PySide6_QtWebEngine-6.9.2_LICENSE.
+  PyQt6-sip            13.10.2    BSD-2-Clause                   Text reproduced below.
+  milsymbol.js         snapshot   MIT                             Symbols/milsymbol.js; see GitHub.com/spatialillusions/milsymbol.
+  pandas               2.2.3      BSD-3-Clause                   Text reproduced below.
+  numpy                2.1.2      BSD-3 + bundled notices        Additional Licenses/Numby-2.1.2_LICENSE.txt.
+  python-dateutil      2.9.0.post0 BSD-3 + Apache-2.0           Text reproduced below.
+  six                  1.16.0     MIT                            Text reproduced below.
+  pytz                 2024.2     MIT                            Text reproduced below.
+  tzdata               2024.2     Apache-2.0                     Canonical text reproduced below.
+  lxml                 6.0.1      BSD-3 with additional notices  Text reproduced below.
+  OpenBLAS/LAPACK/GCC  bundled by numpy                        Covered by numpy license file.
+  Qt translations, etc bundled by PyQt6-Qt6                     Covered by Qt LGPLv3 notice.
+
+  Long-form license files that must be shipped verbatim
+  -----------------------------------------------------
+  • CPython runtime: LICENSE.txt (PSF License 2.0 plus third-party clauses) – distributed with every official Python
+  installer.
+  • PyInstaller bootloader: pyinstaller-6.13.0.dist-info/COPYING.txt – contains GPLv2-or-later plus the PyInstaller
+  exception; include it exactly as provided.
+  • PyQt6 bindings: pyqt6-6.9.1.dist-info/licenses/LICENSE – full GNU General Public License v3 text.
+  • PyQt6-Qt6 runtime: pyqt6_qt6-6.9.2.dist-info/LICENSE – full GNU Lesser General Public License v3 text plus Qt
+  attribution notice.
+  • Qt WebEngine runtime: pyside6_qtwebengine-6.9.2.dist-info/LICENSE – includes the Qt LGPLv3 text and Chromium
+  third-party notices. Ship the entire license directory.
+  • milsymbol.js: Symbols/milsymbol.js – MIT License text included below. Keep the upstream header intact.
+  • numpy wheel: numpy-2.1.2.dist-info/LICENSE.txt – includes the NumPy BSD license, OpenBLAS BSD-3 license, LAPACK BSD-
+  3-attribution terms, and the GCC runtime library exception. Append this entire file so the downstream package receives
+  every notice.
+  • CPython’s embedded third-party clauses (Tcl/Tk, etc.) are already inside the Python LICENSE.txt; do not strip them
+  out.
+
+  License texts reproduced for bundled components
+  -----------------------------------------------
+
+  PyQt6-sip 13.10.2 — BSD 2-Clause License
+  Copyright (c) 2025 Phil Thompson <phil@riverbankcomputing.com>
+
+  Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
+  following conditions are met:
+  1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following
+  disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following
+  disclaimer in the documentation and/or other materials provided with the distribution.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES,
+  INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+  pandas 2.2.3 — BSD 3-Clause License
+  Copyright (c) 2008-2011, AQR Capital Management, LLC, Lambda
+  Foundry, Inc. and PyData Development Team. All rights reserved.
+  Copyright (c) 2011-2023, Open source contributors.
+
+  Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
+  following conditions are met:
+  * Redistributions of source code must retain the above copyright notice, this list of conditions and the following
+  disclaimer.
+  * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following
+  disclaimer in the documentation and/or other materials provided with the distribution.
+  * Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote
+  products derived from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES,
+  INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+  numpy 2.1.2 — BSD 3-Clause License
+  Copyright (c) 2005-2024, NumPy Developers. All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
+  following conditions are met:
+  * Redistributions of source code must retain the above copyright notice, this list of conditions and the following
+  disclaimer.
+  * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following
+  disclaimer in the documentation and/or other materials provided with the distribution.
+  * Neither the name of the NumPy Developers nor the names of any contributors may be used to endorse or promote
+  products derived from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES,
+  INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+  Bundled with the numpy wheel:
+  • OpenBLAS — BSD-3-Clause (see numpy-2.1.2.dist-info/LICENSE.txt for the full notice).
+  • LAPACK — BSD-3-Clause-Attribution (full text in the same file).
+  • GCC runtime library — GPL-3.0 with GCC Runtime Library Exception 3.1 (full text in the same file).
+  Include the upstream license file verbatim for compliance.
+
+  python-dateutil 2.9.0.post0 — Apache 2.0 and BSD 3-Clause
+  Copyright 2017- Paul Ganssle <paul@ganssle.io>
+  Copyright 2017- dateutil contributors (see AUTHORS file)
+
+  Licensed under the Apache License, Version 2.0 (the “License”); you may not use this file except in compliance with
+  the License. You may obtain a copy at http://www.apache.org/licenses/LICENSE-2.0. Unless required by applicable law or
+  agreed to in writing, software distributed under the License is distributed on an “AS IS” BASIS, WITHOUT WARRANTIES OR
+  CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and
+  limitations under the License.
+
+  dateutil – Extensions to the standard Python datetime module.
+  Copyright (c) 2003-2011 Gustavo Niemeyer
+  Copyright (c) 2012-2014 Tomi Pieviläinen
+  Copyright (c) 2014-2016 Yaron de Leeuw
+  Copyright (c) 2015-     Paul Ganssle
+  Copyright (c) 2015-     dateutil contributors
+
+  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
+  following conditions are met:
+  * Redistributions of source code must retain the above copyright notice, this list of conditions and the following
+  disclaimer.
+  * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following
+  disclaimer in the documentation and/or other materials provided with the distribution.
+  * Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote
+  products derived from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES,
+  INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES…
+
+  six 1.16.0 — MIT License
+  Copyright (c) 2010-2020 Benjamin Peterson
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+  documentation files (the “Software”), to deal in the Software without restriction, including without limitation the
+  rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit
+  persons to whom the Software is furnished to do so, subject to the following conditions:
+  The above copyright notice and this permission notice shall be included in all copies or substantial portions of the
+  Software.
+
+  THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+  WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
+  OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+  OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+  milsymbol.js (Spatial Illusions) — MIT License
+  Copyright (c) 2017-2025 Måns Beckman / Spatial Illusions
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+  documentation files (the “Software”), to deal in the Software without restriction, including without limitation the
+  rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit
+  persons to whom the Software is furnished to do so, subject to the following conditions:
+  The above copyright notice and this permission notice shall be included in all copies or substantial portions of the
+  Software.
+
+  THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+  WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
+  OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+  OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+  pytz 2024.2 — MIT License
+  Copyright (c) 2003-2019 Stuart Bishop <stuart@stuartbishop.net>
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+  documentation files (the “Software”), to deal in the Software without restriction, including without limitation the
+  rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit
+  persons to whom the Software is furnished to do so, subject to the following conditions:
+  The above copyright notice and this permission notice shall be included in all copies or substantial portions of the
+  Software.
+
+  THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+  WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
+  OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+  OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+  tzdata 2024.2 — Apache License Version 2.0
+  (Abbreviated header; include the full Apache-2.0 text as required. Canonical text from tzdata-2024.2.dist-info/
+  LICENSE_APACHE follows.)
+
+  Apache License
+  Version 2.0, January 2004
+  http://www.apache.org/licenses/
+
+  TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+  1. Definitions. “License” shall mean … [include Sections 1 through 9 exactly as published by the Apache Software
+  Foundation, plus the Appendix.]
+  END OF TERMS AND CONDITIONS
+
+  (For compliance, copy the entire Apache-2.0 text. The version bundled with tzdata is reproduced in full in the
+  upstream LICENSE_APACHE file.)
+
+  lxml 6.0.1 — BSD 3-Clause with additional notices
+  BSD 3-Clause License
+  Copyright (c) 2004 Infrae. All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
+  following conditions are met:
+  1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following
+  disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following
+  from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS”…
+
+  Additional notices from lxml-6.0.1.dist-info/licenses/LICENSES.txt:
+  • Portions of lxml (e.g., selftest scripts and _elementpath) are derived from ElementTree/cElementTree and are
+  licensed under their original BSD-style terms.
+  • lxml.cssselect and lxml.html are copyright Ian Bicking and are licensed under BSD terms.
+  • The isoschematron implementation bundles ISO schematron schemas and XSL stylesheets; see the files referenced in the
+  resources directory for their specific license text.
+  Include the LICENSES.txt file alongside this notice if you distribute the optional schematron resources.
+
+  Qt runtime (PyQt6-Qt6) and translations — LGPL-3.0-only
+  The Qt runtime files that ship with PyQt6-Qt6 are covered by the GNU Lesser General Public License v3. Copy the entire
+  LGPLv3 text (pyqt6_qt6-6.9.2.dist-info/LICENSE) and retain the Qt copyright notices.
+
+  Qt WebEngine runtime (PySide6-QtWebEngine) — LGPL-3.0-only with additional notices
+  Qt WebEngine embeds Chromium and other third-party libraries licensed under BSD, LGPL, MPL, and other compatible terms.
+  Ship the full pyside6_qtwebengine-6.9.2.dist-info/LICENSE directory (including the Chromium THIRD_PARTY_NOTICES file)
+  and follow Qt’s attribution guidance for WebEngine modules.

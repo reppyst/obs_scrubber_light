@@ -39,6 +39,10 @@ COMPLETED: Explore the possibility of moving from pandas to polars for speed inc
 COMPLETED: New tab next to Entity Classes called Unit Classes. Functions in the same way as Entity Classes but populates AggregateName, Federate and TypeName, MilStd2525CCode, UnitDisEnumeration.
 
 
+TODO: Create Unit and EntityComposition Classes on DRAGON import. Currently Append DRAGON Unit Classes to Master is only method, but could be used as secondary method.
+
+TODO: Explore possibility of creating the mil std 2525c based off of drop down selections.
+
 TODO: Explore LDIF import options.
 
 TODO: MULTI-THREADED? Speed up Processing and Preview Hierarchy Model on slower systems?

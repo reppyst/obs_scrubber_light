@@ -1,0 +1,30 @@
+Scheme,Scheme Modifier,Affiliation,Affiliation Modifier,BattleDimension,BattleDimension Modifier,Status,Status Modifier,Size,Size Modifier,Country,Country Modifier,OrderOfBattle,OrderOfBattle Modifier
+Warfighting,S,Friendly,F,Ground,G,Present,P,Team/Crew,-A,USA,US,Air,A
+,,Neutral,N,Air,A,,,Squad,-B,Other,XC,Ground,G
+,,Hostile,H,Sea Surface,S,,,Section,-C,,,Maritime,N
+,,Suspect,S,Sea Subsurface,U,,,Platoon/Detachment,-D,,,Civilian,C
+,,Unknown,U,SOF,F,,,Company/Battery/Troop,-E,,,Electronic,E
+,,Joker,J,Space,P,,,Battalion/Squadron,-F,,,Strategic Force,S
+,,Faker,K,Other,X,,,Regiment/Group,-G,,,,
+,,,,Unknown,Z,,,Brigade,-H,,,,
+,,,,,,,,Division,-I,,,,
+,,,,,,,,Corps/MEF,-J,,,,
+,,,,,,,,Army,-K,,,,
+,,,,,,,,Army Group/Front,-L,,,,
+,,,,,,,,Region,-M,,,,
+,,,,,,,,Command,-N,,,,
+,,,,,,,,Headquarters,A-,,,,
+,,,,,,,,(HQ) Team/Crew,AA,,,,
+,,,,,,,,(HQ) Squad,AB,,,,
+,,,,,,,,(HQ) Section,AC,,,,
+,,,,,,,,(HQ) Platoon/Detachment,AD,,,,
+,,,,,,,,(HQ) Company/Battery/Troop,AE,,,,
+,,,,,,,,(HQ) Battalion/Squadron,AF,,,,
+,,,,,,,,(HQ) Regiment/Group,AG,,,,
+,,,,,,,,(HQ) Brigade,AH,,,,
+,,,,,,,,(HQ) Division,AI,,,,
+,,,,,,,,(HQ) Corps/MEF,AJ,,,,
+,,,,,,,,(HQ) Army,AK,,,,
+,,,,,,,,(HQ) Army Group/Front,AL,,,,
+,,,,,,,,(HQ) Region,AM,,,,
+,,,,,,,,(HQ) Command,AN,,,,
