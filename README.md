@@ -1,4 +1,5 @@
-# obs_scrubber_light
+# OBS Scrubber Importer Light
+
 The OBS Scrubber Importer Light is currently designed to manipulate essentially all OBS
 Scenario data provided from a JTDS generated XML. The use-case for this software
 differs from site-to-site and system-to-system, so I have hopefully provided enough
