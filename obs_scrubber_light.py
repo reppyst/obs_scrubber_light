@@ -18,7 +18,31 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Iterable, Callable, Ma
 
 from collections import defaultdict
 
-from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QUrl
+from PySide6.QtCore import (
+    Qt,
+    QObject,
+    QThread,
+    Signal,
+    Slot,
+    QUrl,
+    QByteArray,
+    QRectF,
+    QEvent,
+    QBuffer,
+    QIODevice,
+)
+
+from PySide6.QtGui import QIcon, QPixmap, QImage, QPainter, QHelpEvent
+
+try:
+    from PySide6.QtQml import QJSEngine
+except Exception:
+    QJSEngine = None
+
+try:
+    from PySide6.QtSvg import QSvgRenderer
+except Exception:
+    QSvgRenderer = None
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -52,6 +76,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QAbstractItemView,
     QProgressBar,
+    QToolTip,
 )
 
 try:
@@ -82,7 +107,7 @@ except Exception:
 
     LXML = False
 
-__version__ = "1.17"
+__version__ = "1.18"
 
 JTDS_NS = "https://jtds.jten.mil"
 
@@ -3070,6 +3095,289 @@ class CreateEntityDialog(QDialog):
         super().accept()
 
 
+class _UnitEditDialog(QDialog):
+
+    def __init__(
+        self,
+        parent: QWidget,
+        *,
+        name: str,
+        class_name: str,
+        class_options: List[Dict[str, Any]],
+        milstd_code: str,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Unit")
+        self._class_options = class_options
+        self._initial_code = milstd_code or ""
+        self._pending_code = self._initial_code
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.name_edit = QLineEdit(name)
+        form.addRow("Name:", self.name_edit)
+        self.class_combo = QComboBox()
+        self.class_combo.setEditable(True)
+        self.class_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        line_edit = self.class_combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText("Select or type class name")
+            line_edit.textEdited.connect(self._handle_class_text_changed)
+        self.class_combo.addItem("")
+        for entry in class_options:
+            self.class_combo.addItem(entry["name"], entry)
+        self.class_combo.currentIndexChanged.connect(self._handle_class_changed)
+        if class_name:
+            idx = self.class_combo.findText(class_name, Qt.MatchFlag.MatchExactly)
+            if idx >= 0:
+                self.class_combo.setCurrentIndex(idx)
+            else:
+                self.class_combo.setEditText(class_name)
+        form.addRow("Class Name:", self.class_combo)
+        self.code_label = QLabel(self._pending_code or "Not set")
+        self.code_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        form.addRow("MilStd2525C:", self.code_label)
+        self._update_pending_code()
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _handle_class_changed(self, _: int) -> None:
+        self._update_pending_code()
+
+    def _handle_class_text_changed(self, _: str) -> None:
+        self._update_pending_code()
+
+    def _current_class_entry(self) -> Optional[Dict[str, Any]]:
+        data = self.class_combo.currentData()
+        if isinstance(data, dict):
+            return data
+        text_val = (self.class_combo.currentText() or "").strip().upper()
+        for entry in self._class_options:
+            if entry["name"].upper() == text_val:
+                return entry
+        return None
+
+    def _update_pending_code(self) -> None:
+        text = (self.class_combo.currentText() or "").strip()
+        entry = self._current_class_entry()
+        if not text:
+            self._pending_code = ""
+        elif entry is not None:
+            self._pending_code = entry.get("code") or ""
+        else:
+            self._pending_code = self._initial_code
+        if hasattr(self, "code_label"):
+            self.code_label.setText(self._pending_code or "Not set")
+
+    def values(self) -> Tuple[str, str, str, Optional[Dict[str, Any]]]:
+        new_name = (self.name_edit.text() or "").strip()
+        new_class = (self.class_combo.currentText() or "").strip()
+        return new_name, new_class, self._pending_code, self._current_class_entry()
+
+
+class _EntityEditDialog(QDialog):
+
+    def __init__(
+        self,
+        parent: QWidget,
+        *,
+        role: str,
+        class_name: str,
+        class_options: List[Dict[str, Any]],
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Entity Composition")
+        self._class_options = class_options
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.role_edit = QLineEdit(role)
+        form.addRow("Role:", self.role_edit)
+        self.class_combo = QComboBox()
+        self.class_combo.setEditable(True)
+        self.class_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.class_combo.addItem("")
+        for entry in class_options:
+            self.class_combo.addItem(entry["label"], entry)
+        line_edit = self.class_combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText("Select or type class name")
+        if class_name:
+            idx = self.class_combo.findText(class_name, Qt.MatchFlag.MatchExactly)
+            if idx >= 0:
+                self.class_combo.setCurrentIndex(idx)
+            else:
+                self.class_combo.setEditText(class_name)
+        form.addRow("Class Name:", self.class_combo)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _current_class_entry(self) -> Optional[Dict[str, Any]]:
+        data = self.class_combo.currentData()
+        if isinstance(data, dict):
+            return data
+        text_val = (self.class_combo.currentText() or "").strip().upper()
+        for option in self._class_options:
+            if option["label"].upper() == text_val:
+                return option
+        return None
+
+    def values(self) -> Tuple[str, str, Optional[Dict[str, Any]]]:
+        new_role = (self.role_edit.text() or "").strip()
+        new_class = (self.class_combo.currentText() or "").strip()
+        return new_role, new_class, self._current_class_entry()
+
+
+class _SymbolIconFactory:
+    """Renders milsymbol SIDCs into cached Qt icons using QJSEngine."""
+
+    def __init__(self, icon_px: int = 36):
+        self._default_px = max(16, min(int(icon_px), 96))
+        self._cache: Dict[Tuple[str, int], QIcon] = {}
+        self._failed: Set[Tuple[str, int]] = set()
+        self._engine: Optional[Any] = None
+        self._render_func: Optional[Any] = None
+        self._ready = False
+        self._initialize()
+
+    @property
+    def is_ready(self) -> bool:
+        return self._ready
+
+    def icon_for(self, sidc: str, size: Optional[int] = None) -> Optional[QIcon]:
+        sidc = (sidc or "").strip()
+        if not sidc or not self._ready:
+            return None
+        px = self._normalize_size(size if size is not None else self._default_px)
+        key = (sidc, px)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        if key in self._failed:
+            return None
+        svg = self._render_svg(sidc, px)
+        if not svg:
+            self._failed.add(key)
+            return None
+        icon = self._svg_to_icon(svg, px)
+        if icon is None:
+            self._failed.add(key)
+            return None
+        self._cache[key] = icon
+        return icon
+
+    def _initialize(self) -> None:
+        if QJSEngine is None or QSvgRenderer is None:
+            return
+        js_path = _resolve_symbols_path("milsymbol.js")
+        if js_path is None or not js_path.exists():
+            return
+        try:
+            source = js_path.read_text(encoding="utf-8")
+        except Exception:
+            return
+        try:
+            engine = QJSEngine()
+        except Exception:
+            return
+        result = engine.evaluate(source, str(js_path))
+        if self._is_js_error(result):
+            return
+        wrapper = engine.evaluate(
+            """
+            var __milsymbol_render__ = (function () {
+                var lib = null;
+                if (typeof ms !== 'undefined' && ms.Symbol) {
+                    lib = ms;
+                } else if (typeof milsymbol !== 'undefined' && milsymbol.Symbol) {
+                    lib = milsymbol;
+                }
+                return function (sidc, size) {
+                    if (!lib || !sidc) {
+                        return "";
+                    }
+                    try {
+                        var symbol = new lib.Symbol(sidc, { size: size || 36 });
+                        return symbol.asSVG();
+                    } catch (err) {
+                        return "";
+                    }
+                };
+            })();
+            """,
+            "milsymbol_render_wrapper.js",
+        )
+        if self._is_js_error(wrapper):
+            return
+        func = engine.globalObject().property("__milsymbol_render__")
+        if not func.isCallable():
+            return
+        self._engine = engine
+        self._render_func = func
+        self._ready = True
+
+    def _render_svg(self, sidc: str, px: int) -> str:
+        if self._render_func is None:
+            return ""
+        px = self._normalize_size(px)
+        try:
+            result = self._render_func.call([sidc, px])
+        except Exception:
+            return ""
+        if self._is_js_error(result):
+            return ""
+        if hasattr(result, "isString") and result.isString():
+            return result.toString()
+        if hasattr(result, "toVariant"):
+            value = result.toVariant()
+            if isinstance(value, str):
+                return value
+        return ""
+
+    def _is_js_error(self, value: Any) -> bool:
+        try:
+            return bool(value is not None and hasattr(value, "isError") and value.isError())
+        except Exception:
+            return True
+
+    def _svg_to_icon(self, svg: str, px: int) -> Optional[QIcon]:
+        if not svg or QSvgRenderer is None:
+            return None
+        data = QByteArray(svg.encode("utf-8"))
+        renderer = QSvgRenderer(data)
+        if not renderer.isValid():
+            return None
+        size = self._normalize_size(px)
+        image = QImage(size, size, QImage.Format_ARGB32)
+        image.fill(Qt.transparent)
+        painter = QPainter(image)
+        try:
+            renderer.render(painter, QRectF(0, 0, size, size))
+        finally:
+            painter.end()
+        pixmap = QPixmap.fromImage(image)
+        if pixmap.isNull():
+            return None
+        return QIcon(pixmap)
+
+    def _normalize_size(self, value: Optional[int]) -> int:
+        if value is None:
+            return self._default_px
+        try:
+            num = int(value)
+        except Exception:
+            num = self._default_px
+        return max(16, min(num, 256))
+
+
 class ModelPreviewDialog(QDialog):
 
     SIDE_ORDER = list(DEFAULT_SIDE_ORDER)
@@ -3080,6 +3388,10 @@ class ModelPreviewDialog(QDialog):
         self._last_consolidation_label: Optional[str] = None
         self._cached_lvc_to_unit: Optional[Dict[str, ET._Element]] = None
         self._cached_parent_to_children: Optional[Dict[str, List[ET._Element]]] = None
+        self._symbol_icon_factory: Optional[_SymbolIconFactory] = None
+        self._symbol_icons_disabled = False
+        self._icon_base_px = 36
+        self._hover_icon_px = self._icon_base_px * 5
         self.setWindowTitle("Model Hierarchy Preview")
         self.resize(720, 560)
         layout = QVBoxLayout(self)
@@ -3108,6 +3420,7 @@ class ModelPreviewDialog(QDialog):
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.viewport().installEventFilter(self)
         layout.addWidget(self.tree)
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         self._export_btn = btn_box.addButton(
@@ -3135,6 +3448,53 @@ class ModelPreviewDialog(QDialog):
                 collect_unit_maps(self._model)
             )
         return self._cached_lvc_to_unit, self._cached_parent_to_children
+
+    def _collect_unit_class_entries(self) -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+        if self._model is None:
+            return entries
+        parent = jfind(self._model.classdata, jtag("UnitClassList"))
+        if parent is None:
+            return entries
+        seen: Set[str] = set()
+        for child in list(parent):
+            if _local(child.tag) != "UnitClass":
+                continue
+            name = (text(jfind(child, "j:AggregateName")) or "").strip()
+            if not name:
+                continue
+            key = name.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            code = (text(jfind(child, "j:MilStd2525CCode")) or "").strip()
+            entries.append({"name": name, "code": code, "element": child})
+        entries.sort(key=lambda entry: entry["name"].upper())
+        return entries
+
+    def _collect_entity_class_entries(self) -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+        if self._model is None:
+            return entries
+        parent = jfind(self._model.classdata, jtag("EntityCompositionClassList"))
+        if parent is None:
+            return entries
+        seen: Set[str] = set()
+        for child in list(parent):
+            if _local(child.tag) != "EntityCompositionClass":
+                continue
+            label = (text(jfind(child, "j:Name")) or "").strip()
+            if not label:
+                label = (text(jfind(child, "j:ClassName")) or "").strip()
+            if not label:
+                continue
+            key = label.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append({"label": label, "element": child})
+        entries.sort(key=lambda entry: entry["label"].upper())
+        return entries
 
     def set_model(self, model: Optional[ObsModel]) -> None:
         self._model = model
@@ -3233,6 +3593,12 @@ class ModelPreviewDialog(QDialog):
         else:
             self.tree.expandToDepth(0)
 
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if obj is self.tree.viewport() and isinstance(event, QHelpEvent):
+            if self._handle_icon_tooltip(event):
+                return True
+        return super().eventFilter(obj, event)
+
     def _clear_filter(self) -> None:
         if hasattr(self, "_filter_edit"):
             self._filter_edit.blockSignals(True)
@@ -3325,14 +3691,14 @@ class ModelPreviewDialog(QDialog):
         if len(selected_items) == 1:
             kind, _ = selected_items[0]
             if kind == "unit":
-                rename_action = menu.addAction("Rename unit...")
+                rename_action = menu.addAction("Edit unit...")
                 move_action = menu.addAction("Move unit...")
                 create_action = menu.addAction("Add subordinate unit...")
                 create_entity_action = menu.addAction("Add entity composition...")
                 mass_rename_action = menu.addAction("Mass rename subtree...")
                 duplicate_action = menu.addAction("Duplicate unit subtree...")
             elif kind == "entity":
-                rename_action = menu.addAction("Rename entity composition...")
+                rename_action = menu.addAction("Edit entity composition...")
                 move_action = menu.addAction("Move entity to unit...")
             if rename_action or move_action or create_action or duplicate_action:
                 menu.addSeparator()
@@ -3674,26 +4040,43 @@ class ModelPreviewDialog(QDialog):
         old_name = (
             (name_el.text or "").strip() if name_el is not None and name_el.text else ""
         )
-        new_name, ok = QInputDialog.getText(
-            self, "Rename Unit", "New unit name:", text=old_name
+        class_el = jfind(unit_elem, "j:ClassName")
+        old_class = (
+            (class_el.text or "").strip()
+            if class_el is not None and class_el.text
+            else ""
         )
-        if not ok:
+        code_el = jfind(unit_elem, "j:MilStd2525CCode")
+        old_code = (
+            (code_el.text or "").strip()
+            if code_el is not None and code_el.text
+            else ""
+        )
+        class_entries = self._collect_unit_class_entries()
+        dialog = _UnitEditDialog(
+            self,
+            name=old_name,
+            class_name=old_class,
+            class_options=class_entries,
+            milstd_code=old_code,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return False
-        new_name = (new_name or "").strip()
+        new_name, new_class, target_code, selected_entry = dialog.values()
         if not new_name:
-            QMessageBox.information(self, "Rename Unit", "Name cannot be empty.")
+            QMessageBox.information(self, "Edit Unit", "Name cannot be empty.")
             return False
-        if new_name == old_name:
-            return False
+        name_changed = new_name != old_name
         if name_el is None:
             name_el = ET.SubElement(unit_elem, jtag("Name"))
-        name_el.text = new_name
         updated_children = 0
+        if name_changed:
+            name_el.text = new_name
         old_base = ""
-        if old_name:
+        if name_changed and old_name:
             old_base, _ = _split_unit_name_components(old_name)
         new_base, _ = _split_unit_name_components(new_name)
-        if old_base and new_base and old_base.upper() != new_base.upper():
+        if name_changed and old_base and new_base and old_base.upper() != new_base.upper():
             _, parent_to_children = self._ensure_unit_maps()
             for descendant in _gather_unit_descendants(unit_elem, parent_to_children):
                 name_node = jfind(descendant, "j:Name")
@@ -3707,10 +4090,72 @@ class ModelPreviewDialog(QDialog):
                         new_child = f"{new_base}_{child_suffix}"
                     name_node.text = new_child
                     updated_children += 1
-        message = f"Renamed unit to '{new_name}'."
-        if updated_children:
-            message += f" Updated {updated_children} subordinate name(s)."
-        QMessageBox.information(self, "Rename Unit", message)
+        class_changed = False
+        if new_class:
+            if class_el is None:
+                class_el = ET.SubElement(unit_elem, jtag("ClassName"))
+            if (class_el.text or "").strip() != new_class:
+                class_el.text = new_class
+                class_changed = True
+        else:
+            if self._safe_remove_element(unit_elem, class_el):
+                class_changed = True
+                class_el = None
+        target_code = (target_code or "").strip()
+        code_changed = False
+        if target_code:
+            if code_el is None:
+                code_el = ET.SubElement(unit_elem, jtag("MilStd2525CCode"))
+            if (code_el.text or "").strip() != target_code:
+                code_el.text = target_code
+                code_changed = True
+        else:
+            if self._safe_remove_element(unit_elem, code_el):
+                code_changed = True
+                code_el = None
+        enumeration_added = False
+        enumeration_removed = False
+        class_source = selected_entry.get("element") if isinstance(selected_entry, dict) else None
+        if class_source is not None:
+            if self._remove_unit_dis_enumeration(unit_elem):
+                enumeration_removed = True
+            self._copy_unitclass_enumeration(unit_elem, class_source)
+            enumeration_added = True
+        elif class_changed and not new_class:
+            if self._remove_unit_dis_enumeration(unit_elem):
+                enumeration_removed = True
+        if (
+            not name_changed
+            and not class_changed
+            and not code_changed
+            and not enumeration_added
+            and not enumeration_removed
+        ):
+            QMessageBox.information(self, "Edit Unit", "No changes were made.")
+            return False
+        details = []
+        if name_changed:
+            msg = f"Name set to '{new_name}'."
+            if updated_children:
+                msg += f" Updated {updated_children} subordinate name(s)."
+            details.append(msg)
+        if class_changed:
+            if new_class:
+                details.append(f"Class name set to '{new_class}'.")
+            else:
+                details.append("Class name cleared.")
+        if code_changed:
+            if target_code:
+                details.append(f"2525C code set to '{target_code}'.")
+            else:
+                details.append("2525C code cleared.")
+        if enumeration_added and enumeration_removed:
+            details.append("Unit DIS enumeration refreshed from selected class.")
+        elif enumeration_added:
+            details.append("Unit DIS enumeration added from selected class.")
+        elif enumeration_removed:
+            details.append("Unit DIS enumeration cleared.")
+        QMessageBox.information(self, "Edit Unit", " ".join(details))
         return True
 
     def _rename_entity(self, entity_elem: ET._Element) -> bool:
@@ -3718,29 +4163,63 @@ class ModelPreviewDialog(QDialog):
         old_role = (
             (role_el.text or "").strip() if role_el is not None and role_el.text else ""
         )
-        new_role, ok = QInputDialog.getText(
-            self, "Rename Entity Composition", "New role:", text=old_role
+        class_el = jfind(entity_elem, "j:ClassName")
+        old_class = (
+            (class_el.text or "").strip()
+            if class_el is not None and class_el.text
+            else ""
         )
-        if not ok:
+        class_entries = self._collect_entity_class_entries()
+        dialog = _EntityEditDialog(
+            self, role=old_role, class_name=old_class, class_options=class_entries
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return False
-        new_role = (new_role or "").strip()
+        new_role, new_class, _ = dialog.values()
         if not new_role:
             QMessageBox.information(
-                self, "Rename Entity Composition", "Role cannot be empty."
+                self, "Edit Entity Composition", "Role cannot be empty."
             )
             return False
-        if new_role == old_role:
-            return False
+        role_changed = new_role != old_role
         if role_el is None:
             role_el = ET.SubElement(entity_elem, jtag("Role"))
-        role_el.text = new_role
+        if role_changed:
+            role_el.text = new_role
         name_el = jfind(entity_elem, "j:Name")
-        if name_el is not None:
+        if role_changed and name_el is not None:
             name_el.text = new_role
+        class_changed = False
+        if new_class:
+            if class_el is None:
+                class_el = ET.SubElement(entity_elem, jtag("ClassName"))
+            if (class_el.text or "").strip() != new_class:
+                class_el.text = new_class
+                class_changed = True
+        else:
+            if class_el is not None:
+                existing = (class_el.text or "").strip()
+                if existing:
+                    class_changed = True
+                try:
+                    entity_elem.remove(class_el)
+                except Exception:
+                    class_el.text = ""
+        if not role_changed and not class_changed:
+            QMessageBox.information(
+                self, "Edit Entity Composition", "No changes were made."
+            )
+            return False
+        details = []
+        if role_changed:
+            details.append(f"Role set to '{new_role}'.")
+        if class_changed:
+            if new_class:
+                details.append(f"Class name set to '{new_class}'.")
+            else:
+                details.append("Class name cleared.")
         QMessageBox.information(
-            self,
-            "Rename Entity Composition",
-            f"Renamed entity composition to '{new_role}'.",
+            self, "Edit Entity Composition", " ".join(details)
         )
         return True
 
@@ -4035,6 +4514,26 @@ class ModelPreviewDialog(QDialog):
             if value is not None:
                 dest.set(key, str(value))
 
+    def _remove_unit_dis_enumeration(self, unit_elem: ET._Element) -> bool:
+        ude = jfind(unit_elem, "j:UnitDisEnumeration")
+        return self._safe_remove_element(unit_elem, ude)
+
+    def _safe_remove_element(
+        self, parent: ET._Element, child: Optional[ET._Element]
+    ) -> bool:
+        if child is None:
+            return False
+        try:
+            parent.remove(child)
+        except Exception:
+            child.text = ""
+            for sub in list(child):
+                try:
+                    child.remove(sub)
+                except Exception:
+                    continue
+        return True
+
     def _existing_roles_for_unit(self, parent_unit: ET._Element) -> Set[str]:
         roles: Set[str] = set()
         if self._model is None:
@@ -4322,6 +4821,45 @@ class ModelPreviewDialog(QDialog):
         item.setHidden(not visible)
         return visible
 
+    def _handle_icon_tooltip(self, event: QHelpEvent) -> bool:
+        item = self.tree.itemAt(event.pos())
+        if item is None:
+            QToolTip.hideText()
+            return False
+        column = self.tree.columnAt(event.pos().x())
+        if column != 0:
+            QToolTip.hideText()
+            return False
+        icon = item.icon(0)
+        if icon.isNull():
+            QToolTip.hideText()
+            return False
+        code = (item.text(1) or "").strip()
+        large_icon = self._get_symbol_icon(code, size=self._hover_icon_px) or icon
+        html = self._icon_to_tooltip_html(large_icon, self._hover_icon_px)
+        if not html:
+            QToolTip.hideText()
+            return False
+        rect = self.tree.visualItemRect(item)
+        QToolTip.showText(event.globalPos(), html, self.tree, rect)
+        event.accept()
+        return True
+
+    def _icon_to_tooltip_html(self, icon: QIcon, size: int) -> Optional[str]:
+        pixmap = icon.pixmap(size, size)
+        if pixmap.isNull():
+            return None
+        buffer = QBuffer()
+        if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+            return None
+        try:
+            if not pixmap.save(buffer, "PNG"):
+                return None
+            encoded = bytes(buffer.data().toBase64()).decode("ascii")
+        finally:
+            buffer.close()
+        return f"<img src='data:image/png;base64,{encoded}' />"
+
     def _ensure_side_item(
         self,
         side_key: str,
@@ -4355,6 +4893,9 @@ class ModelPreviewDialog(QDialog):
         label = self._format_unit_label(unit)
         code = (text(jfind(unit, "j:MilStd2525CCode")) or "").strip()
         item = QTreeWidgetItem([label, code])
+        icon = self._get_symbol_icon(code)
+        if icon is not None:
+            item.setIcon(0, icon)
         item.setData(0, Qt.ItemDataRole.UserRole, ("unit", unit))
         parent_item.addChild(item)
         lvc = (text(jfind(unit, "j:LvcId")) or "").strip()
@@ -4390,6 +4931,25 @@ class ModelPreviewDialog(QDialog):
         return format_entity_label(
             ec, include_superior=include_superior, superior_hint=superior_hint
         )
+
+    def _get_symbol_icon(self, code: str, size: Optional[int] = None) -> Optional[QIcon]:
+        code = (code or "").strip()
+        if not code or self._symbol_icons_disabled:
+            return None
+        px = size if size is not None else self._icon_base_px
+        try:
+            px = max(16, int(px))
+        except Exception:
+            px = self._icon_base_px
+        factory = self._symbol_icon_factory
+        if factory is None:
+            candidate = _SymbolIconFactory(icon_px=self._icon_base_px)
+            if not candidate.is_ready:
+                self._symbol_icons_disabled = True
+                return None
+            self._symbol_icon_factory = candidate
+            factory = candidate
+        return factory.icon_for(code, size=px)
 
     def _unit_sort_key(self, unit: ET._Element) -> Tuple[int, str, str]:
         return unit_sort_key(unit)
