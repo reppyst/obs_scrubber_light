@@ -107,7 +107,7 @@ except Exception:
 
     LXML = False
 
-__version__ = "1.18"
+__version__ = "1.18b"
 
 JTDS_NS = "https://jtds.jten.mil"
 
@@ -7539,20 +7539,25 @@ class EntityClassesTab(QWidget):
         alias_list = jfind(ecc, "j:AliasList")
         if alias_list is None:
             alias_list = ET.SubElement(ecc, jtag("AliasList"))
-        alias = alias_element
-        desired_federate = target_federate or federate
-        if target_federate and alias is None:
-            candidate = self._find_alias_for_federate(ecc, target_federate)
-            if candidate is not None:
-                alias = candidate
-        if alias is None:
+        desired_federate = (federate or "").strip()
+        target_key = (target_federate or "").strip()
+        alias: Optional[ET._Element] = None
+        if target_key:
+            alias = self._find_alias_for_federate(ecc, target_key)
+        if alias is None and alias_element is not None:
+            existing_fed, _ = self._alias_fields(alias_element)
+            if not target_key or existing_fed.strip().upper() == target_key.upper():
+                alias = alias_element
+        if alias is None and not target_key and desired_federate:
+            alias = self._find_alias_for_federate(ecc, desired_federate)
+        if alias is None and not target_key:
             alias = jfind(alias_list, "j:Alias")
         if alias is None:
             alias = ET.SubElement(alias_list, jtag("Alias"))
         fed = jfind(alias, "j:Federate")
         if fed is None:
             fed = ET.SubElement(alias, jtag("Federate"))
-        fed.text = desired_federate or None
+        fed.text = desired_federate or (target_key or None)
         tname = jfind(alias, "j:TypeName")
         if tname is None:
             tname = ET.SubElement(alias, jtag("TypeName"))
@@ -8542,20 +8547,25 @@ class UnitClassesTab(QWidget):
         alias_list = jfind(ucl, "j:AliasList")
         if alias_list is None:
             alias_list = ET.SubElement(ucl, jtag("AliasList"))
-        alias = alias_element
-        desired_federate = target_federate or federate
-        if target_federate and alias is None:
-            candidate = self._find_alias_for_federate(ucl, target_federate)
-            if candidate is not None:
-                alias = candidate
-        if alias is None:
+        desired_federate = (federate or "").strip()
+        target_key = (target_federate or "").strip()
+        alias: Optional[ET._Element] = None
+        if target_key:
+            alias = self._find_alias_for_federate(ucl, target_key)
+        if alias is None and alias_element is not None:
+            existing_fed, _ = self._alias_fields(alias_element)
+            if not target_key or existing_fed.strip().upper() == target_key.upper():
+                alias = alias_element
+        if alias is None and not target_key and desired_federate:
+            alias = self._find_alias_for_federate(ucl, desired_federate)
+        if alias is None and not target_key:
             alias = jfind(alias_list, "j:Alias")
         if alias is None:
             alias = ET.SubElement(alias_list, jtag("Alias"))
         fed = jfind(alias, "j:Federate")
         if fed is None:
             fed = ET.SubElement(alias, jtag("Federate"))
-        fed.text = desired_federate or None
+        fed.text = desired_federate or (target_key or None)
         tname = jfind(alias, "j:TypeName")
         if tname is None:
             tname = ET.SubElement(alias, jtag("TypeName"))
