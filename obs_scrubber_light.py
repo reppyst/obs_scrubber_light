@@ -107,7 +107,7 @@ except Exception:
 
     LXML = False
 
-__version__ = "1.18b"
+__version__ = "1.20"
 
 JTDS_NS = "https://jtds.jten.mil"
 
@@ -1007,6 +1007,16 @@ def _split_unit_name_components(name: str) -> Tuple[str, str]:
     return name, ""
 
 
+def _normalize_entity_role_base(role: str) -> str:
+    base = (role or "").strip()
+    if not base:
+        return ""
+    base = re.sub(r"^\d+_", "", base)
+    base = re.sub(r"_\d+$", "", base)
+    base = base.strip()
+    return base or (role or "").strip()
+
+
 def _gather_unit_descendants(
     root: ET._Element,
     parent_to_children: Dict[str, List[ET._Element]],
@@ -1041,6 +1051,37 @@ def _iter_local(root: ET._Element, local: str):
     for e in root.iter():
         if _local(e.tag) == local:
             yield e
+
+
+def _remove_federate_aliases(
+    class_list: Optional[ET._Element], class_tag: str, federate: str
+) -> int:
+    if class_list is None:
+        return 0
+    target = federate.strip().upper()
+    if not target:
+        return 0
+    removed = 0
+    for class_elem in list(class_list):
+        if _local(class_elem.tag) != class_tag:
+            continue
+        alias_list = jfind(class_elem, "j:AliasList")
+        if alias_list is not None:
+            for alias in list(alias_list):
+                if _local(alias.tag) != "Alias":
+                    continue
+                fed = (text(jfind(alias, "j:Federate")) or "").strip()
+                if fed.upper() == target:
+                    alias_list.remove(alias)
+                    removed += 1
+        for alias in list(class_elem):
+            if _local(alias.tag) != "Alias":
+                continue
+            fed = (text(jfind(alias, "j:Federate")) or "").strip()
+            if fed.upper() == target:
+                class_elem.remove(alias)
+                removed += 1
+    return removed
 
 
 _DISCODE_ATTRS = (
@@ -3388,6 +3429,7 @@ class ModelPreviewDialog(QDialog):
         self._last_consolidation_label: Optional[str] = None
         self._cached_lvc_to_unit: Optional[Dict[str, ET._Element]] = None
         self._cached_parent_to_children: Optional[Dict[str, List[ET._Element]]] = None
+        self._class_code_by_name: Dict[str, str] = {}
         self._symbol_icon_factory: Optional[_SymbolIconFactory] = None
         self._symbol_icons_disabled = False
         self._icon_base_px = 36
@@ -3499,9 +3541,15 @@ class ModelPreviewDialog(QDialog):
     def set_model(self, model: Optional[ObsModel]) -> None:
         self._model = model
         self._invalidate_unit_cache()
+        self._class_code_by_name = {}
         self.tree.clear()
         if model is None:
             return
+        for entry in self._collect_unit_class_entries():
+            name = (entry.get("name") or "").strip()
+            code = (entry.get("code") or "").strip()
+            if name and code:
+                self._class_code_by_name[name.upper()] = code
         lvc_to_unit, parent_to_children = collect_unit_maps(model)
         self._cached_lvc_to_unit = dict(lvc_to_unit)
         self._cached_parent_to_children = dict(parent_to_children)
@@ -3684,24 +3732,42 @@ class ModelPreviewDialog(QDialog):
         menu = QMenu(self)
         rename_action = None
         move_action = None
+        fix_class_action = None
         create_action = None
         create_entity_action = None
         mass_rename_action = None
         duplicate_action = None
+        renumber_entity_action = None
         if len(selected_items) == 1:
             kind, _ = selected_items[0]
             if kind == "unit":
                 rename_action = menu.addAction("Edit unit...")
+                fix_class_action = menu.addAction("Fix UnitClass reference...")
                 move_action = menu.addAction("Move unit...")
                 create_action = menu.addAction("Add subordinate unit...")
                 create_entity_action = menu.addAction("Add entity composition...")
+                renumber_entity_action = menu.addAction(
+                    "Renumber entity roles (prefix 1_)"
+                )
                 mass_rename_action = menu.addAction("Mass rename subtree...")
                 duplicate_action = menu.addAction("Duplicate unit subtree...")
             elif kind == "entity":
                 rename_action = menu.addAction("Edit entity composition...")
                 move_action = menu.addAction("Move entity to unit...")
-            if rename_action or move_action or create_action or duplicate_action:
+            if (
+                rename_action
+                or move_action
+                or fix_class_action
+                or create_action
+                or duplicate_action
+                or renumber_entity_action
+            ):
                 menu.addSeparator()
+        if fix_class_action is not None and selected_items:
+            item_kind, unit_elem = selected_items[0]
+            if item_kind == "unit" and not self._unitclass_mismatch_exists(unit_elem):
+                fix_class_action.setEnabled(False)
+                fix_class_action.setToolTip("No UnitClass/2525C mismatch detected.")
         delete_action = None
         consolidate_action = None
         if units or entities:
@@ -3739,8 +3805,14 @@ class ModelPreviewDialog(QDialog):
         if create_entity_action is not None and chosen == create_entity_action:
             self._handle_create_entity(selected_items[0][1])
             return
+        if renumber_entity_action is not None and chosen == renumber_entity_action:
+            self._handle_renumber_entity_roles(selected_items[0][1])
+            return
         if rename_action is not None and chosen == rename_action:
             self._handle_rename_request(selected_items[0])
+            return
+        if fix_class_action is not None and chosen == fix_class_action:
+            self._handle_fix_unitclass_reference(selected_items[0][1])
             return
         if mass_rename_action is not None and chosen == mass_rename_action:
             self._handle_mass_rename_subtree(selected_items[0][1])
@@ -3895,6 +3967,230 @@ class ModelPreviewDialog(QDialog):
             changed = self._rename_entity(element)
         if changed:
             self.set_model(self._model)
+
+    def _build_unitclass_lookups(
+        self,
+    ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, List[Dict[str, Any]]], Set[str]]:
+        entries = self._collect_unit_class_entries()
+        by_name: Dict[str, Dict[str, Any]] = {}
+        by_code: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        existing_names: Set[str] = set()
+        for entry in entries:
+            name = (entry.get("name") or "").strip()
+            if name:
+                key = name.upper()
+                by_name.setdefault(key, entry)
+                existing_names.add(key)
+            code = (entry.get("code") or "").strip()
+            if code:
+                by_code[code.upper()].append(entry)
+        return by_name, by_code, existing_names
+
+    def _unitclass_mismatch_exists(self, unit_elem: ET._Element) -> bool:
+        if self._model is None or unit_elem is None:
+            return False
+        unit_code = (text(jfind(unit_elem, "j:MilStd2525CCode")) or "").strip()
+        if not unit_code:
+            return False
+        unit_class = (text(jfind(unit_elem, "j:ClassName")) or "").strip()
+        if not unit_class:
+            return True
+        by_name, _, _ = self._build_unitclass_lookups()
+        class_entry = by_name.get(unit_class.upper())
+        if class_entry is None:
+            return True
+        class_code = (class_entry.get("code") or "").strip()
+        if not class_code:
+            return True
+        return unit_code.upper() != class_code.upper()
+
+    def _unique_unitclass_name(
+        self, base_name: str, existing_names: Set[str], code_hint: str
+    ) -> str:
+        cleaned = (base_name or "").strip() or "UnitClass"
+        candidate = cleaned
+        if candidate.upper() in existing_names:
+            suffix = f" ({code_hint})" if code_hint else " (New)"
+            candidate = f"{cleaned}{suffix}"
+        idx = 2
+        while candidate.upper() in existing_names:
+            candidate = f"{cleaned} ({idx})"
+            idx += 1
+        return candidate
+
+    def _copy_unit_dis_enumeration_to_class(
+        self, unit_elem: ET._Element, class_elem: ET._Element
+    ) -> bool:
+        unit_ude = jfind(unit_elem, "j:UnitDisEnumeration")
+        if unit_ude is None:
+            return False
+        class_ude = jfind(class_elem, "j:UnitDisEnumeration")
+        if class_ude is None:
+            class_ude = ET.SubElement(class_elem, jtag("UnitDisEnumeration"))
+        class_ude.attrib.clear()
+        for key, value in unit_ude.attrib.items():
+            if value is not None:
+                class_ude.set(key, str(value))
+        return True
+
+    def _handle_fix_unitclass_reference(self, unit_elem: ET._Element) -> None:
+        if self._model is None or unit_elem is None:
+            return
+        unit_label = self._format_unit_label(unit_elem)
+        unit_class = (text(jfind(unit_elem, "j:ClassName")) or "").strip()
+        unit_code = (text(jfind(unit_elem, "j:MilStd2525CCode")) or "").strip()
+        if not unit_class and not unit_code:
+            QMessageBox.information(
+                self,
+                "Fix UnitClass Reference",
+                "Selected unit has no ClassName or 2525C code to check.",
+            )
+            return
+        by_name, by_code, existing_names = self._build_unitclass_lookups()
+        class_entry = by_name.get(unit_class.upper()) if unit_class else None
+        class_code = (class_entry.get("code") if class_entry else "") or ""
+        if (
+            unit_class
+            and unit_code
+            and class_code
+            and class_code.strip().upper() == unit_code.strip().upper()
+        ):
+            QMessageBox.information(
+                self,
+                "Fix UnitClass Reference",
+                "Unit 2525C code already matches its assigned UnitClass.",
+            )
+            return
+        if not unit_code:
+            QMessageBox.information(
+                self,
+                "Fix UnitClass Reference",
+                "Selected unit has no 2525C code to match against UnitClassList.",
+            )
+            return
+        matches = by_code.get(unit_code.upper(), [])
+        if matches:
+            target = None
+            if len(matches) == 1:
+                target = matches[0]
+            else:
+                options = [entry.get("name") or "" for entry in matches]
+                selection, ok = QInputDialog.getItem(
+                    self,
+                    "Fix UnitClass Reference",
+                    "Select UnitClass to assign:",
+                    options,
+                    0,
+                    False,
+                )
+                if not ok or not selection:
+                    return
+                target = next(
+                    (entry for entry in matches if entry.get("name") == selection), None
+                )
+            if not target:
+                return
+            if class_entry and target.get("name", "").upper() == unit_class.upper():
+                QMessageBox.information(
+                    self,
+                    "Fix UnitClass Reference",
+                    "Selected unit already uses the matching UnitClass.",
+                )
+                return
+            prompt = (
+                f"Unit '{unit_label}' uses class '{unit_class or 'None'}' "
+                f"with 2525C '{class_code or 'Not set'}', but the unit code is "
+                f"'{unit_code}'.\n\nAssign to UnitClass '{target.get('name')}'?"
+            )
+            confirm = QMessageBox.question(
+                self,
+                "Fix UnitClass Reference",
+                prompt,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+            class_name = target.get("name") or ""
+            class_el = jfind(unit_elem, "j:ClassName")
+            if class_el is None:
+                class_el = ET.SubElement(unit_elem, jtag("ClassName"))
+            class_el.text = class_name
+            class_source = target.get("element")
+            if class_source is not None:
+                self._remove_unit_dis_enumeration(unit_elem)
+                self._copy_unitclass_enumeration(unit_elem, class_source)
+            self.set_model(self._model)
+            QMessageBox.information(
+                self,
+                "Fix UnitClass Reference",
+                f"Assigned '{unit_label}' to UnitClass '{class_name}'.",
+            )
+            return
+        base_name = (
+            unit_class
+            or (text(jfind(unit_elem, "j:Name")) or "").strip()
+            or "UnitClass"
+        )
+        new_name = self._unique_unitclass_name(base_name, existing_names, unit_code)
+        while True:
+            proposed, ok = QInputDialog.getText(
+                self,
+                "New UnitClass Name",
+                "Enter a unique UnitClass name:",
+                QLineEdit.Normal,
+                new_name,
+            )
+            if not ok:
+                return
+            proposed = (proposed or "").strip()
+            if not proposed:
+                QMessageBox.warning(
+                    self,
+                    "Fix UnitClass Reference",
+                    "UnitClass name cannot be empty.",
+                )
+                continue
+            if proposed.upper() in existing_names:
+                QMessageBox.warning(
+                    self,
+                    "Fix UnitClass Reference",
+                    f"UnitClass '{proposed}' already exists.",
+                )
+                new_name = proposed
+                continue
+            new_name = proposed
+            break
+        prompt = (
+            f"No UnitClass uses 2525C code '{unit_code}'.\n\n"
+            f"Create new UnitClass '{new_name}' and assign it to '{unit_label}'?"
+        )
+        confirm = QMessageBox.question(
+            self,
+            "Fix UnitClass Reference",
+            prompt,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        ucl_parent = jfind(self._model.classdata, jtag("UnitClassList"))
+        if ucl_parent is None:
+            ucl_parent = ET.SubElement(self._model.classdata, jtag("UnitClassList"))
+        new_class = ET.SubElement(ucl_parent, jtag("UnitClass"))
+        ET.SubElement(new_class, jtag("AggregateName")).text = new_name
+        ET.SubElement(new_class, jtag("MilStd2525CCode")).text = unit_code
+        self._copy_unit_dis_enumeration_to_class(unit_elem, new_class)
+        class_el = jfind(unit_elem, "j:ClassName")
+        if class_el is None:
+            class_el = ET.SubElement(unit_elem, jtag("ClassName"))
+        class_el.text = new_name
+        self.set_model(self._model)
+        QMessageBox.information(
+            self,
+            "Fix UnitClass Reference",
+            f"Created UnitClass '{new_name}' and assigned '{unit_label}'.",
+        )
 
     def _collect_unit_name_set(
         self, *, exclude_ids: Optional[Set[int]] = None
@@ -4387,6 +4683,73 @@ class ModelPreviewDialog(QDialog):
             f"Created {created} entity composition(s) under '{self._format_unit_label(parent_unit)}'.",
         )
 
+    def _renumber_entity_roles_for_unit(self, parent_lvc: str) -> Tuple[int, int]:
+        if self._model is None or self._model.entcomp_list is None:
+            return 0, 0
+        groups: Dict[str, Dict[str, Any]] = {}
+        for ec in _iter_local(self._model.entcomp_list, "EntityComposition"):
+            sup = (text(jfind(ec, "j:UnitSuperior")) or "").strip()
+            if sup != parent_lvc:
+                continue
+            role = (text(jfind(ec, "j:Role")) or "").strip()
+            base = _normalize_entity_role_base(role)
+            if not base:
+                base = role or "ROLE"
+            key = base.upper()
+            entry = groups.setdefault(key, {"base": base, "items": []})
+            entry["items"].append(ec)
+        updated = 0
+        total = 0
+        for entry in groups.values():
+            base = entry["base"]
+            for idx, ec in enumerate(entry["items"], start=1):
+                new_role = f"{idx}_{base}" if base else str(idx)
+                role_el = jfind(ec, "j:Role")
+                if role_el is None:
+                    role_el = ET.SubElement(ec, jtag("Role"))
+                if (role_el.text or "").strip() != new_role:
+                    role_el.text = new_role
+                    updated += 1
+                total += 1
+        return updated, total
+
+    def _handle_renumber_entity_roles(self, parent_unit: ET._Element) -> None:
+        if self._model is None:
+            return
+        parent_lvc = (text(jfind(parent_unit, "j:LvcId")) or "").strip()
+        if not parent_lvc:
+            QMessageBox.warning(
+                self,
+                "Renumber Entity Roles",
+                "Selected unit does not have an LvcId.",
+            )
+            return
+        label = self._format_unit_label(parent_unit)
+        confirm = QMessageBox.question(
+            self,
+            "Renumber Entity Roles",
+            f"Renumber entity composition roles under '{label}' to the 1_ROLE format?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        updated, total = self._renumber_entity_roles_for_unit(parent_lvc)
+        if total == 0:
+            QMessageBox.information(
+                self,
+                "Renumber Entity Roles",
+                "No entity compositions were found under the selected unit.",
+            )
+            return
+        if updated:
+            msg = f"Renumbered {updated} role(s) under '{label}'."
+        else:
+            msg = f"Entity composition roles under '{label}' already use the 1_ROLE format."
+        QMessageBox.information(self, "Renumber Entity Roles", msg)
+        if updated:
+            self.set_model(self._model)
+
     def _move_unit(self, unit_elem: ET._Element, target: Tuple[str, Any]) -> str:
         kind = target[0]
         label = self._format_unit_label(unit_elem)
@@ -4619,23 +4982,19 @@ class ModelPreviewDialog(QDialog):
         existing_roles = self._existing_roles_for_unit(parent_unit)
         roles_used: Set[str] = set()
         class_name = data.class_name
-        for _ in range(data.batch_count):
-            unique_role = data.role
-            if created > 0:
-                base = f"{data.role}_{created + 1}"
-                candidate = base
-                suffix = 1
-                while (
-                    candidate.upper() in existing_roles
-                    or candidate.upper() in roles_used
+        def _prefixed_role(base: str, start: int) -> str:
+            num = max(1, start)
+            while True:
+                candidate = f"{num}_{base}" if base else str(num)
+                candidate_upper = candidate.upper()
+                if (
+                    candidate_upper not in existing_roles
+                    and candidate_upper not in roles_used
                 ):
-                    suffix += 1
-                    candidate = f"{base}_{suffix}"
-                unique_role = candidate
-            unique_upper = unique_role.upper()
-            while unique_upper in existing_roles or unique_upper in roles_used:
-                unique_role = f"{unique_role}_{created+1}"
-                unique_upper = unique_role.upper()
+                    return candidate
+                num += 1
+        for _ in range(data.batch_count):
+            unique_role = _prefixed_role(data.role, created + 1)
             ec = ET.SubElement(ent_list, jtag("EntityComposition"))
             ec.set("id", _gen_unit_xml_id(used_ids))
             lvc_value = _gen_unique_lvcid("U", used_lvc)
@@ -4892,6 +5251,10 @@ class ModelPreviewDialog(QDialog):
         visited_units.add(id(unit))
         label = self._format_unit_label(unit)
         code = (text(jfind(unit, "j:MilStd2525CCode")) or "").strip()
+        if not code:
+            class_name = (text(jfind(unit, "j:ClassName")) or "").strip()
+            if class_name:
+                code = self._class_code_by_name.get(class_name.upper(), "")
         item = QTreeWidgetItem([label, code])
         icon = self._get_symbol_icon(code)
         if icon is not None:
@@ -6338,6 +6701,469 @@ class _UnitClassRowMeta:
     is_new: bool
 
 
+class UnitClassConflictDialog(QDialog):
+
+    COL_UNIT = 0
+    COL_ISSUE = 1
+    COL_CLASS = 2
+    COL_UNIT_CODE = 3
+    COL_CLASS_CODE = 4
+    COL_MATCHES = 5
+    COL_NEW_NAME = 6
+
+    def __init__(self, parent: Optional[QWidget], model: ObsModel):
+        super().__init__(parent)
+        self._model = model
+        self._conflicts: List[Dict[str, Any]] = []
+        self.setWindowTitle("Unit/Class 2525C Conflicts")
+        self.resize(980, 560)
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            "Scan for units whose 2525C code does not match the code on their assigned UnitClass."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            [
+                "Unit",
+                "Issue",
+                "ClassName",
+                "Unit 2525C",
+                "Class 2525C",
+                "Matching UnitClass(es)",
+                "New UnitClass Name",
+            ]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.SelectedClicked
+        )
+        self.table.setSortingEnabled(True)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(self.COL_UNIT, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(self.COL_NEW_NAME, QHeaderView.ResizeMode.Stretch)
+        for col in range(1, self.COL_NEW_NAME):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self.table)
+        self.status_label = QLabel("")
+        layout.addWidget(self.status_label)
+        btn_row = QHBoxLayout()
+        self.btn_assign_unique = QPushButton("Assign Unique Matches")
+        self.btn_assign_unique.clicked.connect(self._apply_assign_unique)
+        self.btn_assign_selected = QPushButton("Assign Selected...")
+        self.btn_assign_selected.clicked.connect(self._apply_assign_selected)
+        self.btn_create_selected = QPushButton("Create UnitClasses from Selected...")
+        self.btn_create_selected.clicked.connect(self._apply_create_selected)
+        self.btn_refresh = QPushButton("Refresh")
+        self.btn_refresh.clicked.connect(self._reload_table)
+        for btn in [
+            self.btn_assign_unique,
+            self.btn_assign_selected,
+            self.btn_create_selected,
+            self.btn_refresh,
+        ]:
+            btn_row.addWidget(btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._reload_table()
+
+    def _collect_unitclass_entries(self) -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+        if self._model is None:
+            return entries
+        parent = jfind(self._model.classdata, jtag("UnitClassList"))
+        if parent is None:
+            return entries
+        seen: Set[str] = set()
+        for ucl in list(parent):
+            if _local(ucl.tag) != "UnitClass":
+                continue
+            name = (text(jfind(ucl, "j:AggregateName")) or "").strip()
+            if not name:
+                name = (text(jfind(ucl, "j:Name")) or "").strip()
+            if not name:
+                continue
+            key = name.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            code = (text(jfind(ucl, "j:MilStd2525CCode")) or "").strip()
+            entries.append({"name": name, "code": code, "element": ucl})
+        entries.sort(key=lambda entry: entry["name"].upper())
+        return entries
+
+    def _build_unitclass_lookups(
+        self, entries: List[Dict[str, Any]]
+    ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, List[Dict[str, Any]]], Set[str]]:
+        by_name: Dict[str, Dict[str, Any]] = {}
+        by_code: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        existing_names: Set[str] = set()
+        for entry in entries:
+            name = (entry.get("name") or "").strip()
+            if name:
+                key = name.upper()
+                by_name.setdefault(key, entry)
+                existing_names.add(key)
+            code = (entry.get("code") or "").strip()
+            if code:
+                by_code[code.upper()].append(entry)
+        return by_name, by_code, existing_names
+
+    def _unique_unitclass_name(
+        self, base_name: str, existing_names: Set[str], code_hint: str
+    ) -> str:
+        cleaned = (base_name or "").strip() or "UnitClass"
+        candidate = cleaned
+        if candidate.upper() in existing_names:
+            suffix = f" ({code_hint})" if code_hint else " (New)"
+            candidate = f"{cleaned}{suffix}"
+        idx = 2
+        while candidate.upper() in existing_names:
+            candidate = f"{cleaned} ({idx})"
+            idx += 1
+        return candidate
+
+    def _scan_conflicts(self) -> List[Dict[str, Any]]:
+        if self._model is None:
+            return []
+        entries = self._collect_unitclass_entries()
+        by_name, by_code, existing_names = self._build_unitclass_lookups(entries)
+        used_names = set(existing_names)
+        suggested_by_code: Dict[str, str] = {}
+        conflicts: List[Dict[str, Any]] = []
+        for unit in _iter_local(self._model.unit_list, "Unit"):
+            unit_code = (text(jfind(unit, "j:MilStd2525CCode")) or "").strip()
+            if not unit_code:
+                continue
+            class_name = (text(jfind(unit, "j:ClassName")) or "").strip()
+            class_entry = by_name.get(class_name.upper()) if class_name else None
+            class_code = (class_entry.get("code") if class_entry else "") or ""
+            issue = None
+            if not class_name:
+                issue = "Missing ClassName"
+            elif class_entry is None:
+                issue = "ClassName not in UnitClassList"
+            elif not class_code:
+                issue = "UnitClass missing 2525C"
+            elif unit_code.strip().upper() != class_code.strip().upper():
+                issue = "2525C mismatch"
+            if not issue:
+                continue
+            matches = by_code.get(unit_code.upper(), [])
+            if unit_code.upper() in suggested_by_code:
+                suggested = suggested_by_code[unit_code.upper()]
+            else:
+                base_name = class_name or (text(jfind(unit, "j:Name")) or "").strip()
+                suggested = self._unique_unitclass_name(base_name, used_names, unit_code)
+                suggested_by_code[unit_code.upper()] = suggested
+                used_names.add(suggested.upper())
+            conflicts.append(
+                {
+                    "unit": unit,
+                    "unit_label": format_unit_label(unit),
+                    "class_name": class_name,
+                    "unit_code": unit_code,
+                    "class_code": class_code,
+                    "matches": matches,
+                    "issue": issue,
+                    "suggested_name": suggested,
+                }
+            )
+        return conflicts
+
+    def _reload_table(self) -> None:
+        self._conflicts = self._scan_conflicts()
+        was_sorting = self.table.isSortingEnabled()
+        if was_sorting:
+            self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
+        for conflict in self._conflicts:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            unit_item = QTableWidgetItem(conflict.get("unit_label") or "")
+            unit_item.setData(Qt.ItemDataRole.UserRole, conflict)
+            issue_item = QTableWidgetItem(conflict.get("issue") or "")
+            class_item = QTableWidgetItem(conflict.get("class_name") or "")
+            unit_code_item = QTableWidgetItem(conflict.get("unit_code") or "")
+            class_code_item = QTableWidgetItem(conflict.get("class_code") or "")
+            matches = conflict.get("matches") or []
+            match_names = ", ".join(entry.get("name") or "" for entry in matches) or "None"
+            match_item = QTableWidgetItem(match_names)
+            new_name_item = QTableWidgetItem(conflict.get("suggested_name") or "")
+            for col, item in enumerate(
+                [
+                    unit_item,
+                    issue_item,
+                    class_item,
+                    unit_code_item,
+                    class_code_item,
+                    match_item,
+                    new_name_item,
+                ]
+            ):
+                if col != self.COL_NEW_NAME:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.table.setItem(row, col, item)
+        if was_sorting:
+            self.table.setSortingEnabled(True)
+        unique_matches = sum(
+            1 for conflict in self._conflicts if len(conflict.get("matches") or []) == 1
+        )
+        total = len(self._conflicts)
+        self.status_label.setText(
+            f"{total} conflict(s) found; {unique_matches} with a unique match."
+        )
+        has_rows = total > 0
+        self.btn_assign_unique.setEnabled(unique_matches > 0)
+        self.btn_assign_selected.setEnabled(has_rows)
+        self.btn_create_selected.setEnabled(has_rows)
+
+    def _selected_conflicts(self) -> List[Tuple[int, Dict[str, Any]]]:
+        rows = sorted({item.row() for item in self.table.selectedItems()})
+        selections: List[Tuple[int, Dict[str, Any]]] = []
+        for row in rows:
+            item = self.table.item(row, self.COL_UNIT)
+            if item is None:
+                continue
+            data = _normalize_user_data(item.data(Qt.ItemDataRole.UserRole))
+            if isinstance(data, dict):
+                selections.append((row, data))
+        return selections
+
+    def _remove_unit_dis_enumeration(self, unit_elem: ET._Element) -> bool:
+        ude = jfind(unit_elem, "j:UnitDisEnumeration")
+        if ude is None:
+            return False
+        try:
+            unit_elem.remove(ude)
+        except Exception:
+            ude.text = ""
+            for sub in list(ude):
+                try:
+                    ude.remove(sub)
+                except Exception:
+                    continue
+        return True
+
+    def _copy_unitclass_enumeration(
+        self, unit_elem: ET._Element, class_elem: ET._Element
+    ) -> None:
+        ude = jfind(class_elem, "j:UnitDisEnumeration")
+        if ude is None:
+            return
+        dest = ET.SubElement(unit_elem, jtag("UnitDisEnumeration"))
+        for key, value in ude.attrib.items():
+            if value is not None:
+                dest.set(key, str(value))
+
+    def _copy_unit_dis_enumeration_to_class(
+        self, unit_elem: ET._Element, class_elem: ET._Element
+    ) -> None:
+        unit_ude = jfind(unit_elem, "j:UnitDisEnumeration")
+        if unit_ude is None:
+            return
+        class_ude = jfind(class_elem, "j:UnitDisEnumeration")
+        if class_ude is None:
+            class_ude = ET.SubElement(class_elem, jtag("UnitDisEnumeration"))
+        class_ude.attrib.clear()
+        for key, value in unit_ude.attrib.items():
+            if value is not None:
+                class_ude.set(key, str(value))
+
+    def _assign_unit_to_class(
+        self, unit_elem: ET._Element, class_entry: Dict[str, Any]
+    ) -> bool:
+        class_name = (class_entry.get("name") or "").strip()
+        if not class_name:
+            return False
+        class_el = jfind(unit_elem, "j:ClassName")
+        if class_el is None:
+            class_el = ET.SubElement(unit_elem, jtag("ClassName"))
+        if (class_el.text or "").strip() != class_name:
+            class_el.text = class_name
+        class_source = class_entry.get("element")
+        if class_source is not None:
+            self._remove_unit_dis_enumeration(unit_elem)
+            self._copy_unitclass_enumeration(unit_elem, class_source)
+        return True
+
+    def _create_unitclass_for_unit(
+        self, unit_elem: ET._Element, name: str, code: str
+    ) -> bool:
+        if self._model is None:
+            return False
+        ucl_parent = jfind(self._model.classdata, jtag("UnitClassList"))
+        if ucl_parent is None:
+            ucl_parent = ET.SubElement(self._model.classdata, jtag("UnitClassList"))
+        new_class = ET.SubElement(ucl_parent, jtag("UnitClass"))
+        ET.SubElement(new_class, jtag("AggregateName")).text = name
+        ET.SubElement(new_class, jtag("MilStd2525CCode")).text = code
+        self._copy_unit_dis_enumeration_to_class(unit_elem, new_class)
+        class_el = jfind(unit_elem, "j:ClassName")
+        if class_el is None:
+            class_el = ET.SubElement(unit_elem, jtag("ClassName"))
+        class_el.text = name
+        return True
+
+    def _apply_assign_unique(self) -> None:
+        updated = 0
+        for conflict in self._conflicts:
+            matches = conflict.get("matches") or []
+            if len(matches) != 1:
+                continue
+            if self._assign_unit_to_class(conflict["unit"], matches[0]):
+                updated += 1
+        if not updated:
+            QMessageBox.information(
+                self, "Assign UnitClass", "No unique matches were available."
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Assign UnitClass",
+            f"Assigned {updated} unit(s) to unique matching UnitClasses.",
+        )
+        self._reload_table()
+
+    def _apply_assign_selected(self) -> None:
+        selections = self._selected_conflicts()
+        if not selections:
+            QMessageBox.information(
+                self, "Assign UnitClass", "Select one or more rows first."
+            )
+            return
+        updated = 0
+        skipped: List[str] = []
+        for _, conflict in selections:
+            matches = conflict.get("matches") or []
+            if not matches:
+                skipped.append(conflict.get("unit_label") or "Unknown Unit")
+                continue
+            target = matches[0]
+            if len(matches) > 1:
+                options = [entry.get("name") or "" for entry in matches]
+                selection, ok = QInputDialog.getItem(
+                    self,
+                    "Assign UnitClass",
+                    f"Select UnitClass for '{conflict.get('unit_label') or ''}':",
+                    options,
+                    0,
+                    False,
+                )
+                if not ok or not selection:
+                    continue
+                target = next(
+                    (entry for entry in matches if entry.get("name") == selection), None
+                )
+                if target is None:
+                    continue
+            if self._assign_unit_to_class(conflict["unit"], target):
+                updated += 1
+        message = f"Assigned {updated} unit(s)."
+        if skipped:
+            preview = ", ".join(skipped[:5])
+            if len(skipped) > 5:
+                preview += ", ..."
+            message += f" Skipped {len(skipped)} without matches ({preview})."
+        QMessageBox.information(self, "Assign UnitClass", message)
+        if updated:
+            self._reload_table()
+
+    def _apply_create_selected(self) -> None:
+        selections = self._selected_conflicts()
+        if not selections:
+            QMessageBox.information(
+                self, "Create UnitClass", "Select one or more rows first."
+            )
+            return
+        existing_names = {
+            entry["name"].upper() for entry in self._collect_unitclass_entries()
+        }
+        errors: List[str] = []
+        skipped_with_match: List[str] = []
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for row, conflict in selections:
+            matches = conflict.get("matches") or []
+            if matches:
+                skipped_with_match.append(conflict.get("unit_label") or "Unknown Unit")
+                continue
+            code = (conflict.get("unit_code") or "").strip()
+            if not code:
+                errors.append(
+                    f"{conflict.get('unit_label') or 'Unit'}: missing 2525C code."
+                )
+                continue
+            name_item = self.table.item(row, self.COL_NEW_NAME)
+            name = (name_item.text() if name_item else "").strip()
+            if not name:
+                errors.append(
+                    f"{conflict.get('unit_label') or 'Unit'}: missing UnitClass name."
+                )
+                continue
+            key = code.upper()
+            bucket = grouped.setdefault(
+                key, {"code": code, "name": name, "conflicts": []}
+            )
+            if bucket["name"].upper() != name.upper():
+                errors.append(
+                    f"{conflict.get('unit_label') or 'Unit'}: multiple names provided for 2525C '{code}'."
+                )
+                continue
+            bucket["conflicts"].append(conflict)
+        if errors:
+            preview = "\n".join(errors[:5])
+            if len(errors) > 5:
+                preview += "\n..."
+            QMessageBox.warning(self, "Create UnitClass", preview)
+            return
+        for bucket in grouped.values():
+            name = bucket["name"].strip()
+            key = name.upper()
+            if key in existing_names:
+                errors.append(f"UnitClass '{name}' already exists.")
+            existing_names.add(key)
+        if errors:
+            preview = "\n".join(errors[:5])
+            if len(errors) > 5:
+                preview += "\n..."
+            QMessageBox.warning(self, "Create UnitClass", preview)
+            return
+        created = 0
+        assigned_units = 0
+        for bucket in grouped.values():
+            code = bucket["code"]
+            name = bucket["name"].strip()
+            conflicts = bucket["conflicts"]
+            if not conflicts:
+                continue
+            if self._create_unitclass_for_unit(conflicts[0]["unit"], name, code):
+                created += 1
+                for conflict in conflicts[1:]:
+                    if self._assign_unit_to_class(
+                        conflict["unit"], {"name": name, "element": None}
+                    ):
+                        assigned_units += 1
+        message = f"Created {created} UnitClass entries."
+        if assigned_units:
+            message += f" Assigned {assigned_units} additional unit(s)."
+        if skipped_with_match:
+            preview = ", ".join(skipped_with_match[:5])
+            if len(skipped_with_match) > 5:
+                preview += ", ..."
+            message += (
+                f" Skipped {len(skipped_with_match)} with existing code matches ({preview})."
+            )
+        QMessageBox.information(self, "Create UnitClass", message)
+        if created:
+            self._reload_table()
+
+
 @dataclass(frozen=True)
 class MilStd2525Entry:
 
@@ -6934,6 +7760,9 @@ class EntityClassesTab(QWidget):
         self.federate_combo.addItem(self._federate_label_all)
         self.federate_combo.currentTextChanged.connect(self._on_federate_filter_changed)
         filter_row.addWidget(self.federate_combo)
+        self.btn_remove_aliases = QPushButton("Remove Federate Aliases...")
+        self.btn_remove_aliases.clicked.connect(self._on_remove_federate_aliases)
+        filter_row.addWidget(self.btn_remove_aliases)
         filter_row.addStretch()
         outer.addLayout(filter_row)
         controls = QHBoxLayout()
@@ -6987,6 +7816,7 @@ class EntityClassesTab(QWidget):
             self.btn_sort,
             self.table,
             self.federate_combo,
+            self.btn_remove_aliases,
         ]:
             widget.setEnabled(enabled)
 
@@ -7035,6 +7865,54 @@ class EntityClassesTab(QWidget):
             self.federate_combo.setCurrentIndex(0)
         self.federate_combo.blockSignals(block)
         self._refreshing_federate_combo = False
+
+    def _on_remove_federate_aliases(self) -> None:
+        if not self.model:
+            return
+        options = self._collect_federate_names()
+        if not options:
+            QMessageBox.information(
+                self, "Remove Entity Class Aliases", "No federate aliases were found."
+            )
+            return
+        current = self._current_federate_filter() or self.federate_combo.currentText().strip()
+        try:
+            default_index = options.index(current)
+        except ValueError:
+            default_index = 0
+        selection, ok = QInputDialog.getItem(
+            self,
+            "Remove Entity Class Aliases",
+            "Remove aliases for federate:",
+            options,
+            default_index,
+            True,
+        )
+        if not ok:
+            return
+        target = (selection or "").strip()
+        if not target:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Alias Removal",
+            f"Remove all alias entries for federate '{target}' from EntityCompositionClasses?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        ecc_parent = jfind(self.model.classdata, jtag("EntityCompositionClassList"))
+        removed = _remove_federate_aliases(ecc_parent, "EntityCompositionClass", target)
+        if removed == 1:
+            msg = f"Removed 1 alias entry for federate '{target}'."
+        elif removed:
+            msg = f"Removed {removed} alias entries for federate '{target}'."
+        else:
+            msg = f"No alias entries found for federate '{target}'."
+        QMessageBox.information(self, "Remove Entity Class Aliases", msg)
+        self._reload_table()
+        self._refresh_federate_combo()
 
     def set_model(self, model: Optional[ObsModel]):
         self.model = model
@@ -7730,6 +8608,9 @@ class UnitClassesTab(QWidget):
         self.federate_combo.addItem(self._federate_label_all)
         self.federate_combo.currentTextChanged.connect(self._on_federate_filter_changed)
         filter_row.addWidget(self.federate_combo)
+        self.btn_remove_aliases = QPushButton("Remove Federate Aliases...")
+        self.btn_remove_aliases.clicked.connect(self._on_remove_federate_aliases)
+        filter_row.addWidget(self.btn_remove_aliases)
         filter_row.addStretch()
         outer.addLayout(filter_row)
         controls = QHBoxLayout()
@@ -7745,6 +8626,8 @@ class UnitClassesTab(QWidget):
         self.btn_import.clicked.connect(self._on_import)
         self.btn_export = QPushButton("Export CSV...")
         self.btn_export.clicked.connect(self._on_export)
+        self.btn_scan_conflicts = QPushButton("Scan Unit/Class Conflicts...")
+        self.btn_scan_conflicts.clicked.connect(self._on_scan_conflicts)
         self.sort_combo = QComboBox()
         self.sort_combo.addItems(["AggregateName (A-Z)", "2525C Code (A-Z)"])
         self.btn_sort = QPushButton("Sort")
@@ -7755,6 +8638,7 @@ class UnitClassesTab(QWidget):
         controls.addWidget(self.btn_save)
         controls.addWidget(self.btn_import)
         controls.addWidget(self.btn_export)
+        controls.addWidget(self.btn_scan_conflicts)
         controls.addWidget(QLabel("Sort by:"))
         controls.addWidget(self.sort_combo)
         controls.addWidget(self.btn_sort)
@@ -7792,10 +8676,12 @@ class UnitClassesTab(QWidget):
             self.btn_save,
             self.btn_import,
             self.btn_export,
+            self.btn_scan_conflicts,
             self.sort_combo,
             self.btn_sort,
             self.table,
             self.federate_combo,
+            self.btn_remove_aliases,
         ]:
             widget.setEnabled(enabled)
 
@@ -7994,6 +8880,54 @@ class UnitClassesTab(QWidget):
         self.federate_combo.blockSignals(block)
         self._refreshing_federate_combo = False
 
+    def _on_remove_federate_aliases(self) -> None:
+        if not self.model:
+            return
+        options = self._collect_federate_names()
+        if not options:
+            QMessageBox.information(
+                self, "Remove Unit Class Aliases", "No federate aliases were found."
+            )
+            return
+        current = self._current_federate_filter() or self.federate_combo.currentText().strip()
+        try:
+            default_index = options.index(current)
+        except ValueError:
+            default_index = 0
+        selection, ok = QInputDialog.getItem(
+            self,
+            "Remove Unit Class Aliases",
+            "Remove aliases for federate:",
+            options,
+            default_index,
+            True,
+        )
+        if not ok:
+            return
+        target = (selection or "").strip()
+        if not target:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Alias Removal",
+            f"Remove all alias entries for federate '{target}' from UnitClasses?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        ucl_parent = jfind(self.model.classdata, jtag("UnitClassList"))
+        removed = _remove_federate_aliases(ucl_parent, "UnitClass", target)
+        if removed == 1:
+            msg = f"Removed 1 alias entry for federate '{target}'."
+        elif removed:
+            msg = f"Removed {removed} alias entries for federate '{target}'."
+        else:
+            msg = f"No alias entries found for federate '{target}'."
+        QMessageBox.information(self, "Remove Unit Class Aliases", msg)
+        self._reload_table()
+        self._refresh_federate_combo()
+
     def set_model(self, model: Optional[ObsModel]):
         self.model = model
         has_model = model is not None
@@ -8127,8 +9061,6 @@ class UnitClassesTab(QWidget):
         with self._suspend_table_item_signals():
             name_item = QTableWidgetItem(name)
             name_item.setData(Qt.ItemDataRole.UserRole, key)
-            if not is_new:
-                name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(row, 0, name_item)
             for col, value in enumerate(
                 [federate, typename, code2525, unit_enum], start=1
@@ -8344,6 +9276,18 @@ class UnitClassesTab(QWidget):
     def _on_sort(self) -> None:
         column = 0 if self.sort_combo.currentIndex() == 0 else 3
         self.table.sortItems(column)
+
+    def _on_scan_conflicts(self) -> None:
+        if not self.model:
+            QMessageBox.information(
+                self,
+                "Scan Unit/Class Conflicts",
+                "Load or create a JTDS OBS model first.",
+            )
+            return
+        dlg = UnitClassConflictDialog(self, self.model)
+        dlg.exec()
+        self._reload_table()
 
     def _on_export(self) -> None:
         rows = self._table_rows()
@@ -8615,10 +9559,30 @@ class UnitClassesTab(QWidget):
         if ucl_parent is None:
             ucl_parent = ET.SubElement(self.model.classdata, jtag("UnitClassList"))
         errors: List[str] = []
+        name_to_rows: Dict[str, List[int]] = defaultdict(list)
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            name_text = (name_item.text() if name_item else "").strip()
+            if not name_text:
+                errors.append(f"Row {row + 1}: AggregateName is required.")
+                continue
+            name_to_rows[name_text.upper()].append(row + 1)
+        for key, rows in name_to_rows.items():
+            if len(rows) > 1:
+                errors.append(
+                    f"AggregateName '{key}' appears in multiple rows: {', '.join(str(r) for r in rows)}."
+                )
+        if errors:
+            preview = "\n".join(errors[:5])
+            if len(errors) > 5:
+                preview += "\n..."
+            QMessageBox.warning(self, "Save Unit Classes", preview)
+            return
         created = 0
         updated = 0
         existing_name_keys = self._collect_existing_name_keys()
         filter_value = self._current_federate_filter()
+        rename_map: Dict[str, str] = {}
         for row in range(self.table.rowCount()):
             name_item = self.table.item(row, 0)
             if name_item is None:
@@ -8645,11 +9609,6 @@ class UnitClassesTab(QWidget):
                     )
                     continue
             if meta.is_new:
-                if not aggregate:
-                    errors.append(
-                        f"Row {row + 1}: AggregateName is required for new entries."
-                    )
-                    continue
                 key_upper = aggregate.upper()
                 if key_upper in existing_name_keys:
                     errors.append(
@@ -8666,8 +9625,11 @@ class UnitClassesTab(QWidget):
                 ucl = meta.element
                 if ucl is None:
                     continue
+                old_name = self._extract_aggregate_name(ucl)
                 if aggregate:
                     self._ensure_child_text(ucl, "AggregateName", aggregate)
+                if old_name and aggregate and old_name.upper() != aggregate.upper():
+                    rename_map[old_name.upper()] = aggregate
                 updated += 1
             if meta.element is None:
                 continue
@@ -8688,10 +9650,26 @@ class UnitClassesTab(QWidget):
                 preview += "\n..."
             QMessageBox.warning(self, "Save Unit Classes", preview)
             return
+        renamed_units = 0
+        if rename_map:
+            for unit in _iter_local(self.model.unit_list, "Unit"):
+                class_el = jfind(unit, "j:ClassName")
+                if class_el is None or not class_el.text:
+                    continue
+                key = class_el.text.strip().upper()
+                new_name = rename_map.get(key)
+                if new_name and class_el.text.strip() != new_name:
+                    class_el.text = new_name
+                    renamed_units += 1
         QMessageBox.information(
             self,
             "Save Unit Classes",
-            f"UnitClass changes saved. Updated {updated}, created {created}.",
+            (
+                f"UnitClass changes saved. Updated {updated}, created {created}."
+                + (f" Updated {renamed_units} unit(s) to the new class names."
+                   if renamed_units
+                   else "")
+            ),
         )
         self._reload_table()
         self._refresh_federate_combo()
